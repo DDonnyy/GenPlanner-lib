@@ -10,27 +10,44 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        py: ["3.11", "3.12"]
+        os: [ ubuntu-latest, windows-latest, macos-latest ]
+        py: [ "3.11", "3.12" ]
+        include:
+          - os: ubuntu-latest
+            py: "3.11"
+            py_tag: "cp311-cp311"
+          - os: ubuntu-latest
+            py: "3.12"
+            py_tag: "cp312-cp312"
+
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
+        if: matrix.os != 'ubuntu-latest'
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.py }}
 
-      - name: Build wheels
+      - name: Build wheels (Linux manylinux)
+        if: matrix.os == 'ubuntu-latest'
         uses: PyO3/maturin-action@v1
         with:
           command: build
-          args: --release --out dist
-          working-directory: .
+          args: --release --out dist -i /opt/python/${{ matrix.py_tag }}/bin/python
           manylinux: auto
+
+      - name: Build wheels (Windows/macOS)
+        if: matrix.os != 'ubuntu-latest'
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist -i python
+          manylinux: off
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.os }}
+          name: wheels-${{ matrix.os }}-py${{ matrix.py }}
           path: dist/*
 
   publish:
