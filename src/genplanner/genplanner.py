@@ -207,7 +207,8 @@ class GenPlanner:
 
         if len(roads) > 0:
             gdf = self._split_by_roads(gdf, roads, simplify_geometry, simplify_value)
-
+        else:
+            self.user_valid_roads = gpd.GeoDataFrame()
         if len(existing_terr_zones) > 0:
             gdf = self._split_by_existing_terr_zones(
                 gdf, existing_terr_zones, simplify_geometry, simplify_value, existing_tz_fill_ratio
