@@ -8,6 +8,7 @@ fn problem() -> (
     Vec<f32>,
     Vec<f32>,
     Vec<(usize, usize)>,
+    Vec<(usize, usize)>,
 ) {
     let vtxl2xy = vec![
         0.0, 0.44495219, 0.01798835, 0.37901258, 0.03597671, 0.31307297, 0.08087802, 0.25117152,
@@ -44,6 +45,7 @@ fn problem() -> (
         0.09799259, 0.09799259, 0.09799259, 0.09799259, 0.09799259, 0.04355226,
     ];
     let room_connections = vec![];
+    let room_forbidden = vec![];
     (
         vtxl2xy,
         site2xy,
@@ -51,22 +53,31 @@ fn problem() -> (
         site2xy2flag,
         room2area_trg,
         room_connections,
+        room_forbidden,
     )
 }
 
-
 fn main() -> anyhow::Result<()> {
-    let (vtxl2xy, site2xy, site2room, site2xy2flag, room2area_trg, room_connections) = problem();
+    let (
+        vtxl2xy,
+        site2xy,
+        site2room,
+        site2xy2flag,
+        room2area_trg,
+        room_connections,
+        room_forbidden,
+    ) = problem();
 
     let create_gif = true;
     let res = optimize(
-            vtxl2xy,
-            site2xy,
-            site2room,
-            site2xy2flag,
-            room2area_trg,
-            room_connections,
-            create_gif,
-        )?;
+        vtxl2xy,
+        site2xy,
+        site2room,
+        site2xy2flag,
+        room2area_trg,
+        room_connections,
+        room_forbidden,
+        create_gif,
+    )?;
     Ok(())
 }

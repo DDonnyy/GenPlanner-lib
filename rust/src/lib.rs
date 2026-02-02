@@ -1,6 +1,6 @@
-mod polygonmesh2_to_cogs;
 mod loss_topo;
 mod polygonmesh2_to_areas;
+mod polygonmesh2_to_cogs;
 mod voronoi2;
 mod vtx2xyz_to_edgevector;
 
@@ -17,6 +17,7 @@ fn optimize_space(
     site2xy2flag: Vec<f32>,
     room2area_trg: Vec<f32>,
     room_connections: Vec<(usize, usize)>,
+    room_forbidden: Vec<(usize, usize)>,
     write_logs: bool,
 ) -> PyResult<(Vec<usize>, Vec<usize>, Vec<f32>, Vec<usize>)> {
     let result = panic::catch_unwind(|| {
@@ -27,6 +28,7 @@ fn optimize_space(
             site2xy2flag,
             room2area_trg,
             room_connections,
+            room_forbidden,
             write_logs,
         )
     });
@@ -130,6 +132,7 @@ pub fn optimize(
     site2xy2flag: Vec<f32>,
     room2area_trg: Vec<f32>,
     room_connections: Vec<(usize, usize)>,
+    room_forbidden: Vec<(usize, usize)>,
     write_logs: bool,
 ) -> anyhow::Result<(Vec<usize>, Vec<usize>, Vec<f32>, Vec<usize>)> {
     let mut final_vtxv2xy = Vec::new();
@@ -266,6 +269,7 @@ pub fn optimize(
             room2area_trg.dims2()?.0,
             &voronoi_info,
             &room_connections,
+            &room_forbidden,
         )?;
 
         let loss_group_fix =
@@ -297,7 +301,6 @@ pub fn optimize(
 
         let loss_group_fix = loss_group_fix.affine(80.0, 0.0)?;
         // dbg!(loss_fix.flatten_all()?.to_vec1::<f32>());
-        eprintln!("write_logs={}", write_logs);
 
         // let loss_fix_topo = loss_fix.mul(&loss_topo)?.affine(0.01, 0.)?;
         if write_logs {
@@ -336,22 +339,6 @@ pub fn optimize(
 
         // println!("  loss: {}", loss.to_vec0::<f32>()?);
         optimizer.backward_step(&loss)?;
-        // ----------------
-        // visualization
-        // if let Some(canvas_gif) = &mut canvas_gif {
-        //     canvas_gif.clear(0);
-        //     crate::my_paint(
-        //         canvas_gif,
-        //         &transform_world2pix,
-        //         &vtxl2xy,
-        //         &site2xy.flatten_all()?.to_vec1::<f32>()?,
-        //         &voronoi_info,
-        //         &vtxv2xy.flatten_all()?.to_vec1::<f32>()?,
-        //         &site2room,
-        //         &edge2vtxv_wall,
-        //     );
-        //     canvas_gif.write();
-        // }
         if _iter == n_iter - 1 {
             final_site2idx = voronoi_info.site2idx;
             final_idx2vtxv = voronoi_info.idx2vtxv;

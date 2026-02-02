@@ -1,7 +1,6 @@
-use candle_core::{Result, Tensor};
 use crate::voronoi2::VoronoiInfo;
+use candle_core::{Result, Tensor};
 use nalgebra::Vector2;
-
 
 fn topology(
     voronoi_info: &VoronoiInfo,
@@ -134,11 +133,51 @@ fn find_nearest_site(
     pair
 }
 
+fn find_nearest_adjacent_sites(
+    i0_room: usize,
+    i1_room: usize,
+    site2room: &[usize],
+    room2site: &Vec<Vec<usize>>,
+    voronoi_info: &VoronoiInfo,
+    site2xy0: &[f32],
+) -> Option<(usize, usize)> {
+    let mut best_i = usize::MAX;
+    let mut best_j = usize::MAX;
+    let mut best_d2 = f32::INFINITY;
+
+    for &i_site in room2site[i0_room].iter() {
+        let i_beg = voronoi_info.site2idx[i_site];
+        let i_end = voronoi_info.site2idx[i_site + 1];
+        for &j_site in &voronoi_info.idx2site[i_beg..i_end] {
+            if j_site == usize::MAX {
+                continue;
+            }
+            if site2room[j_site] != i1_room {
+                continue;
+            }
+            let pi = del_msh_core::vtx2xy::to_vec2(site2xy0, i_site);
+            let pj = del_msh_core::vtx2xy::to_vec2(site2xy0, j_site);
+            let d = v2(pi) - v2(pj);
+            let d2 = d.dot(&d);
+            if d2 < best_d2 {
+                best_d2 = d2;
+                best_i = i_site;
+                best_j = j_site;
+            }
+        }
+    }
+
+    if best_i == usize::MAX {
+        None
+    } else {
+        Some((best_i, best_j))
+    }
+}
+
 #[inline]
 fn v2(p: &[f32; 2]) -> Vector2<f32> {
     Vector2::new(p[0], p[1])
 }
-
 
 pub fn compute_topo_loss(
     site2xy: &Tensor,
@@ -146,14 +185,18 @@ pub fn compute_topo_loss(
     num_room: usize,
     voronoi_info: &VoronoiInfo,
     room_connections: &Vec<(usize, usize)>,
+    room_forbidden: &Vec<(usize, usize)>,
 ) -> Result<Tensor> {
     let num_site = site2xy.dims2()?.0;
     let (num_group, site2group, room2group) = topology(voronoi_info, num_room, site2room);
     let room2site = inverse_map(num_room, site2room);
     let group2site = inverse_map(num_group, &site2group);
+
     let site2xy0 = site2xy.flatten_all()?.to_vec1::<f32>()?;
     assert_eq!(site2xy0.len(), num_site * 2);
     let mut site2xytrg = site2xy0.clone();
+
+    // existing logic: split-fix + required connections
     for i_room in 0..num_room {
         assert!(!room2group[i_room].is_empty());
         if room2group[i_room].len() == 1 {
@@ -210,7 +253,6 @@ pub fn compute_topo_loss(
                 }
                 continue;
             }
-            // assert!(i_group!=usize::MAX);
             for ij_group in 0..room2group[i_room].len() {
                 let j_group = room2group[i_room][ij_group];
                 if i_group == j_group {
@@ -235,6 +277,55 @@ pub fn compute_topo_loss(
             }
         }
     }
+
+    // FORBID: push apart forbidden adjacent rooms (only when both rooms are in one piece)
+
+    let push = 0.02_f32;
+
+    for &(a_room, b_room) in room_forbidden.iter() {
+        if a_room >= num_room || b_room >= num_room || a_room == b_room {
+            continue;
+        }
+        // avoid fighting with split-fix (and avoid weird behavior when room has multiple groups)
+        if room2group[a_room].len() != 1 || room2group[b_room].len() != 1 {
+            continue;
+        }
+
+        let is_connected =
+            is_two_room_connected(a_room, b_room, site2room, &room2site, voronoi_info);
+        if !is_connected {
+            continue; // nothing to fix
+        }
+
+        // pick an actually adjacent pair of sites across the boundary
+        if let Some((a_site, b_site)) = find_nearest_adjacent_sites(
+            a_room,
+            b_room,
+            site2room,
+            &room2site,
+            voronoi_info,
+            &site2xy0,
+        ) {
+            let pa = del_msh_core::vtx2xy::to_vec2(&site2xy0, a_site);
+            let pb = del_msh_core::vtx2xy::to_vec2(&site2xy0, b_site);
+            let mut d = v2(pa) - v2(pb);
+            let n = d.norm();
+            if n > 1e-8 {
+                d /= n;
+
+                // move both away (symmetric)
+                let ta = v2(pa) + d * (0.5 * push);
+                let tb = v2(pb) - d * (0.5 * push);
+
+                // optional clamp if you use normalized coords
+                site2xytrg[a_site * 2 + 0] = ta[0].clamp(0.0, 1.0);
+                site2xytrg[a_site * 2 + 1] = ta[1].clamp(0.0, 1.0);
+                site2xytrg[b_site * 2 + 0] = tb[0].clamp(0.0, 1.0);
+                site2xytrg[b_site * 2 + 1] = tb[1].clamp(0.0, 1.0);
+            }
+        }
+    }
+
     let site2xytrg = Tensor::from_vec(
         site2xytrg,
         candle_core::Shape::from_dims(&[num_site, 2usize]),
