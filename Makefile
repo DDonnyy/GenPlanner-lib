@@ -30,8 +30,8 @@ publish:
 update:
 	poetry update
 
-build_install_rust:
-	poetry run maturin build develop
+dev_install_rust:
+	poetry run maturin develop
 
 build_release_rust:
 	poetry run maturin build --release

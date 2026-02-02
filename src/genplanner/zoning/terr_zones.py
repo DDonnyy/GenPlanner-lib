@@ -31,7 +31,7 @@ class TerritoryZone:
         return (self.name, self.min_block_area) < (other.name, other.min_block_area)
 
 
-minimum_block_area = 80000
+minimum_block_area = 25000
 
 residential_terr = TerritoryZone(
     "residential",
@@ -39,25 +39,25 @@ residential_terr = TerritoryZone(
 )
 industrial_terr = TerritoryZone(
     "industrial",
-    minimum_block_area * 4,
+    minimum_block_area * 8,
 )
 business_terr = TerritoryZone(
     "business",
-    minimum_block_area,
+    minimum_block_area * 2,
 )
 recreation_terr = TerritoryZone(
     "recreation",
-    minimum_block_area * 2,
+    minimum_block_area * 4,
 )
 transport_terr = TerritoryZone(
     "transport",
-    minimum_block_area,
+    minimum_block_area * 8,
 )
 agriculture_terr = TerritoryZone(
     "agriculture",
-    minimum_block_area * 4,
+    minimum_block_area * 12,
 )
 special_terr = TerritoryZone(
     "special",
-    minimum_block_area,
+    minimum_block_area * 2,
 )
