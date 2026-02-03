@@ -9,7 +9,22 @@ use crate::voronoi2::VoronoiInfo;
 use pyo3::prelude::*;
 use std::panic;
 
+use std::fs::OpenOptions;
+use std::io::{BufWriter, Write};
+use std::path::Path;
+
 #[pyfunction]
+#[pyo3(signature = (
+    vtxl2xy,
+    site2xy,
+    site2room,
+    site2xy2flag,
+    room2area_trg,
+    room_connections,
+    room_forbidden,
+    write_logs,
+    run_name
+))]
 fn optimize_space(
     vtxl2xy: Vec<f32>,
     site2xy: Vec<f32>,
@@ -19,6 +34,7 @@ fn optimize_space(
     room_connections: Vec<(usize, usize)>,
     room_forbidden: Vec<(usize, usize)>,
     write_logs: bool,
+    run_name: String,
 ) -> PyResult<(Vec<usize>, Vec<usize>, Vec<f32>, Vec<usize>)> {
     let result = panic::catch_unwind(|| {
         optimize(
@@ -30,6 +46,7 @@ fn optimize_space(
             room_connections,
             room_forbidden,
             write_logs,
+            run_name,
         )
     });
     match result {
@@ -125,6 +142,24 @@ pub fn room2area(
     };
     sum_sites_for_rooms.matmul(&site2areas)
 }
+
+fn open_csv_with_header(path: &str, header: &str) -> anyhow::Result<BufWriter<std::fs::File>> {
+    let existed = Path::new(path).exists();
+    let file = OpenOptions::new()
+        .write(true)
+        .append(true)
+        .create(true)
+        .open(path)?;
+    let mut w = BufWriter::new(file);
+
+    // если файл новый или пустой — пишем header
+    if !existed || std::fs::metadata(path)?.len() == 0 {
+        writeln!(&mut w, "{}", header)?;
+        w.flush()?;
+    }
+    Ok(w)
+}
+
 pub fn optimize(
     vtxl2xy: Vec<f32>,     // Границы полигона
     site2xy: Vec<f32>,     // фиксация точек
@@ -134,6 +169,7 @@ pub fn optimize(
     room_connections: Vec<(usize, usize)>,
     room_forbidden: Vec<(usize, usize)>,
     write_logs: bool,
+    run_name: String,
 ) -> anyhow::Result<(Vec<usize>, Vec<usize>, Vec<f32>, Vec<usize>)> {
     let mut final_vtxv2xy = Vec::new();
     let mut final_site2idx = Vec::new();
@@ -158,26 +194,49 @@ pub fn optimize(
         }
     }
 
+    // +++ список “двигающихся” сайтов: у кого обе компоненты флага == 0
+    let movable_sites: Vec<usize> = (0..num_sites)
+        .filter(|&i| site2xy2flag[i * 2] == 0.0 && site2xy2flag[i * 2 + 1] == 0.0)
+        .collect();
+
+    let mut loss_writer: Option<BufWriter<std::fs::File>> = None;
+    let mut sites_writer: Option<BufWriter<std::fs::File>> = None;
+
+    if write_logs {
+        let loss_path = format!("{}.csv", run_name);
+        let sites_path = format!("{}_sites.csv", run_name);
+
+        loss_writer = Some(open_csv_with_header(
+            &loss_path,
+            "iter,loss_each_area,loss_total_area,loss_walllen,loss_topo,loss_fix,loss_lloyd,loss_group_fix,lr",
+        )?);
+
+        sites_writer = Some(open_csv_with_header(&sites_path, "iter,site,x,y")?);
+    }
+
     let site2xy = candle_core::Var::from_slice(
         &site2xy,
         candle_core::Shape::from_dims(&[site2xy.len() / 2, 2]),
         &candle_core::Device::Cpu,
     )
     .unwrap();
+
     let site2xy2flag = candle_core::Var::from_slice(
         &site2xy2flag,
         candle_core::Shape::from_dims(&[site2xy2flag.len() / 2, 2]),
         &candle_core::Device::Cpu,
     )
     .unwrap();
+
     let site2xy_ini = candle_core::Tensor::from_vec(
         site2xy.flatten_all().unwrap().to_vec1::<f32>()?,
         candle_core::Shape::from_dims(&[site2xy.dims2()?.0, 2usize]),
         &candle_core::Device::Cpu,
     )
     .unwrap();
+
     assert_eq!(site2room.len(), site2xy.dims2()?.0);
-    //
+
     let room2area_trg = {
         let num_room = room2area_trg.len();
         candle_core::Tensor::from_vec(
@@ -187,13 +246,14 @@ pub fn optimize(
         )
         .unwrap()
     };
+
     let adamw_params = candle_nn::ParamsAdamW {
         lr: 0.2,
         ..Default::default()
     };
-
     use candle_nn::Optimizer;
     let mut optimizer = candle_nn::AdamW::new(vec![site2xy.clone()], adamw_params)?;
+
     let n_sites = site2room.len();
     let base_iter = 150;
     let max_iter = 400;
@@ -263,6 +323,7 @@ pub fn optimize(
             // edge2xy.abs()?.affine(1.0,1.0)?.sqr()?.sum_all()?
             edge2xy.abs()?.sum_all()?
         };
+
         let loss_topo = loss_topo::compute_topo_loss(
             &site2xy,
             &site2room,
@@ -298,34 +359,32 @@ pub fn optimize(
         let loss_topo = loss_topo.affine(150.0, 0.0)?;
         let loss_fix = loss_fix.affine(10000000., 0.0)?;
         let loss_lloyd = loss_lloyd.affine(120.0, 0.0)?;
-
         let loss_group_fix = loss_group_fix.affine(80.0, 0.0)?;
-        // dbg!(loss_fix.flatten_all()?.to_vec1::<f32>());
 
-        // let loss_fix_topo = loss_fix.mul(&loss_topo)?.affine(0.01, 0.)?;
         if write_logs {
-            {
-                use std::io::Write;
-                let file = std::fs::OpenOptions::new()
-                    .write(true)
-                    .append(true)
-                    .create(true)
-                    .open("conv.csv")?;
-                let mut writer = std::io::BufWriter::new(&file);
+            if let Some(w) = loss_writer.as_mut() {
                 writeln!(
-                    &mut writer,
-                    "{}, {},{},{},{},{},{},{},{}",
+                    w,
+                    "{},{},{},{},{},{},{},{},{}",
                     _iter,
-                    loss_each_area.clone().to_vec0::<f32>()?,
-                    loss_total_area.clone().to_vec0::<f32>()?,
-                    loss_walllen.clone().to_vec0::<f32>()?,
-                    loss_topo.clone().to_vec0::<f32>()?,
-                    loss_fix.clone().to_vec0::<f32>()?,
-                    loss_lloyd.clone().to_vec0::<f32>()?,
-                    loss_group_fix.clone().to_vec0::<f32>()?,
+                    loss_each_area.to_vec0::<f32>()?,
+                    loss_total_area.to_vec0::<f32>()?,
+                    loss_walllen.to_vec0::<f32>()?,
+                    loss_topo.to_vec0::<f32>()?,
+                    loss_fix.to_vec0::<f32>()?,
+                    loss_lloyd.to_vec0::<f32>()?,
+                    loss_group_fix.to_vec0::<f32>()?,
                     current_lr,
-                )
-                .expect("TODO: panic message");
+                )?;
+            }
+
+            if let Some(w) = sites_writer.as_mut() {
+                let xy = site2xy.flatten_all()?.to_vec1::<f32>()?;
+                for &i_site in &movable_sites {
+                    let x = xy[i_site * 2];
+                    let y = xy[i_site * 2 + 1];
+                    writeln!(w, "{},{},{},{}", _iter, i_site, x, y)?;
+                }
             }
         }
 
@@ -337,8 +396,8 @@ pub fn optimize(
             + loss_lloyd
             + loss_group_fix)?;
 
-        // println!("  loss: {}", loss.to_vec0::<f32>()?);
         optimizer.backward_step(&loss)?;
+
         if _iter == n_iter - 1 {
             final_site2idx = voronoi_info.site2idx;
             final_idx2vtxv = voronoi_info.idx2vtxv;
@@ -346,6 +405,14 @@ pub fn optimize(
             final_edge2vtxv_wall = edge2vtxv_wall.clone();
         }
     }
+
+    if let Some(mut w) = loss_writer {
+        w.flush()?;
+    }
+    if let Some(mut w) = sites_writer {
+        w.flush()?;
+    }
+
     Ok((
         final_site2idx,
         final_idx2vtxv,

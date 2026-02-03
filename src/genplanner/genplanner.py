@@ -66,9 +66,9 @@ class GenPlanner:
             existing_tz_merge_radius,
         )
 
-        self.dev_mod = not parallel
-        if self.dev_mod:
-            logger.info("Dev mod activated, no more ProcessPool")
+        self.dev_mode = not parallel
+        if self.dev_mode:
+            logger.info("Dev mode activated, no more ProcessPool")
 
     def _exclude_features(self, gdf, exclude_features, simplify_geometry, simplify_value):
         exclude_features = exclude_features.to_crs(self.local_crs)
@@ -223,9 +223,9 @@ class GenPlanner:
 
     def _run(self, initial_func, *args, **kwargs):
         task_queue = multiprocessing.Queue()
-        kwargs.update({"dev_mod": self.dev_mod})
+        kwargs.update({"dev_mode": self.dev_mode})
         task_queue.put((initial_func, args, kwargs))
-        generated_zones, generated_roads = parallel_split_queue(task_queue, self.local_crs, dev=self.dev_mod)
+        generated_zones, generated_roads = parallel_split_queue(task_queue, self.local_crs, dev=self.dev_mode)
 
         complete_zones = pd.concat([generated_zones, self.existing_terr_zones], ignore_index=True)
 

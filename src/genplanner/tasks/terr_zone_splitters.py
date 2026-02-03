@@ -85,6 +85,7 @@ def multi_feature2terr_zones_initial(task, **kwargs):
         local_crs=local_crs,
         fixed_zone_points=fixed_zones_in_poly,
         allow_multipolygon=True,
+        dev=kwargs.get("dev_mode", False),
     )
 
     # Разворачиваем прокси зоны обратно
@@ -287,6 +288,7 @@ def feature2terr_zones_initial(task, **kwargs):
         point_radius=poisson_n_radius.get(len(terr_zones), 0.1),
         local_crs=local_crs,
         fixed_zone_points=fixed_zones_in_poly,
+        dev=kwargs.get("dev_mode", False),
     )
 
     if not zones.empty:

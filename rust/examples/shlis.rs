@@ -68,7 +68,7 @@ fn main() -> anyhow::Result<()> {
         room_forbidden,
     ) = problem();
 
-    let create_gif = true;
+    
     let res = optimize(
         vtxl2xy,
         site2xy,
@@ -77,7 +77,8 @@ fn main() -> anyhow::Result<()> {
         room2area_trg,
         room_connections,
         room_forbidden,
-        create_gif,
+        true,
+        "test_run".parse()?
     )?;
     Ok(())
 }

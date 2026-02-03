@@ -1,23 +1,46 @@
+from dataclasses import dataclass
+from enum import Enum
 from functools import total_ordering
 
 
+class TerritoryZoneKind(str, Enum):
+    RESIDENTIAL = "residential"
+    INDUSTRIAL = "industrial"
+    BUSINESS = "business"
+    RECREATION = "recreation"
+    TRANSPORT = "transport"
+    AGRICULTURE = "agriculture"
+    SPECIAL = "special"
+
+
+minimum_block_area = 25000  # m^2
+
+
 @total_ordering
+@dataclass(frozen=True, slots=True)
 class TerritoryZone:
-    min_block_area: float  # m^2
+
+    kind: TerritoryZoneKind
     name: str
+    min_block_area: float = minimum_block_area
 
-    def __init__(self, name, min_block_area: float = 160000):
-        self.min_block_area = min_block_area
-        self.name = name
+    def __post_init__(self):
+        if not isinstance(self.kind, TerritoryZoneKind):
+            try:
+                object.__setattr__(self, "kind", TerritoryZoneKind(str(self.kind)))
+            except Exception as e:
+                raise ValueError(
+                    f"Invalid TerritoryZone kind: {self.kind!r}. " f"Allowed: {[k.value for k in TerritoryZoneKind]}"
+                ) from e
 
-    def __str__(self):
-        return f'Territory zone "{self.name}"'
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError("TerritoryZone name must be a non-empty string")
 
-    def __repr__(self):
-        return self.__str__()
+        if self.min_block_area <= 0:
+            raise ValueError("min_block_area must be > 0")
 
-    def __hash__(self):
-        return hash((self.name, self.min_block_area))
+    def __str__(self) -> str:
+        return f'Territory zone "{self.name}" ({self.kind.value})'
 
     def __eq__(self, other):
         if isinstance(other, self.__class__):
@@ -28,36 +51,51 @@ class TerritoryZone:
     def __lt__(self, other):
         if not isinstance(other, TerritoryZone):
             return NotImplemented
-        return (self.name, self.min_block_area) < (other.name, other.min_block_area)
+        return (self.kind.value, self.name, self.min_block_area) < (
+            other.kind.value,
+            other.name,
+            other.min_block_area,
+        )
 
-
-minimum_block_area = 25000
 
 residential_terr = TerritoryZone(
-    "residential",
-    minimum_block_area,
+    kind=TerritoryZoneKind.RESIDENTIAL,
+    name="residential",
+    min_block_area=minimum_block_area,
 )
+
 industrial_terr = TerritoryZone(
-    "industrial",
-    minimum_block_area * 8,
+    kind=TerritoryZoneKind.INDUSTRIAL,
+    name="industrial",
+    min_block_area=minimum_block_area * 8,
 )
+
 business_terr = TerritoryZone(
-    "business",
-    minimum_block_area * 2,
+    kind=TerritoryZoneKind.BUSINESS,
+    name="business",
+    min_block_area=minimum_block_area * 2,
 )
+
 recreation_terr = TerritoryZone(
-    "recreation",
-    minimum_block_area * 4,
+    kind=TerritoryZoneKind.RECREATION,
+    name="recreation",
+    min_block_area=minimum_block_area * 4,
 )
+
 transport_terr = TerritoryZone(
-    "transport",
-    minimum_block_area * 8,
+    kind=TerritoryZoneKind.TRANSPORT,
+    name="transport",
+    min_block_area=minimum_block_area * 8,
 )
+
 agriculture_terr = TerritoryZone(
-    "agriculture",
-    minimum_block_area * 12,
+    kind=TerritoryZoneKind.AGRICULTURE,
+    name="agriculture",
+    min_block_area=minimum_block_area * 12,
 )
+
 special_terr = TerritoryZone(
-    "special",
-    minimum_block_area * 2,
+    kind=TerritoryZoneKind.SPECIAL,
+    name="special",
+    min_block_area=minimum_block_area * 2,
 )
