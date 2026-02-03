@@ -171,7 +171,7 @@ def territory_splitter(
     return polygons.to_crs(original_crs)
 
 
-def patch_polygon_interior(polygon: Polygon) -> Polygon:
+def patch_polygon_interior(polygon: Polygon, patch_line_width=1) -> Polygon:
     inner_geoms = [Polygon(ring) for ring in polygon.interiors]
     while len(inner_geoms) > 0:
         lines = []
@@ -180,7 +180,7 @@ def patch_polygon_interior(polygon: Polygon) -> Polygon:
             poly = all_but_cur.pop(i)
             lines.append(
                 LineString(nearest_points(poly, GeometryCollection(all_but_cur + [polygon.exterior])))
-                .buffer(0.01, resolution=1)
+                .buffer(patch_line_width / 2, resolution=2)
                 .exterior
             )
 
