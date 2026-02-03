@@ -199,6 +199,8 @@ class GenPlanner:
 
         gdf = gdf.to_crs(self.local_crs)
         gdf = gdf.explode(ignore_index=True)
+        if simplify_geometry:
+            gdf.geometry = gdf.geometry.simplify(simplify_value)
 
         if len(exclude_features) > 0:
             gdf = self._exclude_features(gdf, exclude_features, simplify_geometry, simplify_value)
