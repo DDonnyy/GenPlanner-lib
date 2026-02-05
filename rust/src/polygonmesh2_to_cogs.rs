@@ -3,7 +3,7 @@ use std::ops::Deref;
 use candle_core::{CpuStorage, Layout, Shape, Tensor};
 
 pub struct Layer {
-    pub elem2idx: Vec<usize>,
+    pub cell_elem2polygon_idx: Vec<usize>,
     pub idx2vtx: Vec<usize>,
 }
 
@@ -19,9 +19,9 @@ impl candle_core::CustomOp1 for Layer {
     ) -> candle_core::Result<(CpuStorage, Shape)> {
         assert_eq!(layout.shape().dims2()?.1, 2);
         let vtx2xy = storage.as_slice::<f32>()?;
-        // TODO: from_polygon_mesh_as_faces
+
         let elem2cog = del_msh_core::elem2center::from_polygon_mesh_as_points(
-            &self.elem2idx,
+            &self.cell_elem2polygon_idx,
             &self.idx2vtx,
             vtx2xy,
             2,
@@ -50,22 +50,22 @@ impl candle_core::CustomOp1 for Layer {
         assert_eq!(two, 2);
         //
         let mut dw_vtx2xy = vec![0f32; num_vtx * 2];
-        for i_elem in 0..self.elem2idx.len() - 1 {
-            let num_vtx_in_elem = self.elem2idx[i_elem + 1] - self.elem2idx[i_elem];
+        for i_elem in 0..self.cell_elem2polygon_idx.len() - 1 {
+            let num_vtx_in_elem = self.cell_elem2polygon_idx[i_elem + 1] - self.cell_elem2polygon_idx[i_elem];
             let ratio = if num_vtx_in_elem == 0 {
                 0.0
             } else {
                 1.0 / num_vtx_in_elem as f32
             };
             for i_edge in 0..num_vtx_in_elem {
-                let i0_vtx = self.idx2vtx[self.elem2idx[i_elem] + i_edge];
+                let i0_vtx = self.idx2vtx[self.cell_elem2polygon_idx[i_elem] + i_edge];
                 dw_vtx2xy[i0_vtx * 2] += ratio * dw_elem2cog[i_elem * 2];
                 dw_vtx2xy[i0_vtx * 2 + 1] += ratio * dw_elem2cog[i_elem * 2 + 1];
             }
         }
         let dw_vtx2xy = candle_core::Tensor::from_vec(
             dw_vtx2xy,
-            candle_core::Shape::from((num_vtx, 2)),
+            Shape::from((num_vtx, 2)),
             &candle_core::Device::Cpu,
         )?;
         Ok(Some(dw_vtx2xy))

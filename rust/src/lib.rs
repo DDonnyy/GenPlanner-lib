@@ -11,40 +11,39 @@ use std::panic;
 
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
-use std::path::Path;
 
 #[pyfunction]
 #[pyo3(signature = (
-    vtxl2xy,
-    site2xy,
-    site2room,
-    site2xy2flag,
-    room2area_trg,
-    room_connections,
-    room_forbidden,
+    boundary_xy,
+    generator_points_xy,
+    point2zone,
+    point_fixed_mask,
+    zone_target_area,
+    zone_neighbors,
+    zone_forbidden,
     write_logs,
     run_name
 ))]
-fn optimize_space(
-    vtxl2xy: Vec<f32>,
-    site2xy: Vec<f32>,
-    site2room: Vec<usize>,
-    site2xy2flag: Vec<f32>,
-    room2area_trg: Vec<f32>,
-    room_connections: Vec<(usize, usize)>,
-    room_forbidden: Vec<(usize, usize)>,
+fn optimize_territory_zoning(
+    boundary_xy: Vec<f32>,
+    generator_points_xy: Vec<f32>,
+    point2zone: Vec<usize>,
+    point_fixed_mask: Vec<f32>,
+    zone_target_area: Vec<f32>,
+    zone_neighbors: Vec<(usize, usize)>,
+    zone_forbidden: Vec<(usize, usize)>,
     write_logs: bool,
     run_name: String,
 ) -> PyResult<(Vec<usize>, Vec<usize>, Vec<f32>, Vec<usize>)> {
     let result = panic::catch_unwind(|| {
-        optimize(
-            vtxl2xy,
-            site2xy,
-            site2room,
-            site2xy2flag,
-            room2area_trg,
-            room_connections,
-            room_forbidden,
+        optimize_zoning(
+            boundary_xy,
+            generator_points_xy,
+            point2zone,
+            point_fixed_mask,
+            zone_target_area,
+            zone_neighbors,
+            zone_forbidden,
             write_logs,
             run_name,
         )
@@ -71,26 +70,26 @@ fn optimize_space(
 
 #[pymodule]
 fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(optimize_space, m)?)?;
+    m.add_function(wrap_pyfunction!(optimize_territory_zoning, m)?)?;
     Ok(())
 }
 
-pub fn edge2vtvx_wall(voronoi_info: &VoronoiInfo, site2room: &[usize]) -> Vec<usize> {
-    let site2idx = &voronoi_info.site2idx;
-    let idx2vtxv = &voronoi_info.idx2vtxv;
+pub fn edge2vtvx_wall(voronoi_info: &VoronoiInfo, point2zone: &[usize]) -> Vec<usize> {
+    let point2cell_idx = &voronoi_info.point2cell_idx;
+    let idx2vtxv = &voronoi_info.cell_idx2vertex_idx;
     let mut edge2vtxv = vec![0usize; 0];
     // get wall between rooms
-    for i_site in 0..site2idx.len() - 1 {
-        let i_room = site2room[i_site];
-        if i_room == usize::MAX {
+    for i_site in 0..point2cell_idx.len() - 1 {
+        let i_zone = point2zone[i_site];
+        if i_zone == usize::MAX {
             continue;
         }
-        let num_vtx_in_site = site2idx[i_site + 1] - site2idx[i_site];
+        let num_vtx_in_site = point2cell_idx[i_site + 1] - point2cell_idx[i_site];
         for i0_vtx in 0..num_vtx_in_site {
             let i1_vtx = (i0_vtx + 1) % num_vtx_in_site;
-            let idx = site2idx[i_site] + i0_vtx;
+            let idx = point2cell_idx[i_site] + i0_vtx;
             let i0_vtxv = idx2vtxv[idx];
-            let i1_vtxv = idx2vtxv[site2idx[i_site] + i1_vtx];
+            let i1_vtxv = idx2vtxv[point2cell_idx[i_site] + i1_vtx];
             let j_site = voronoi_info.idx2site[idx];
             if j_site == usize::MAX {
                 continue;
@@ -98,8 +97,8 @@ pub fn edge2vtvx_wall(voronoi_info: &VoronoiInfo, site2room: &[usize]) -> Vec<us
             if i_site >= j_site {
                 continue;
             }
-            let j_room = site2room[j_site];
-            if i_room == j_room {
+            let j_room = point2zone[j_site];
+            if i_zone == j_room {
                 continue;
             }
             edge2vtxv.push(i0_vtxv);
@@ -109,34 +108,34 @@ pub fn edge2vtvx_wall(voronoi_info: &VoronoiInfo, site2room: &[usize]) -> Vec<us
     edge2vtxv
 }
 
-pub fn room2area(
-    site2room: &[usize],
-    num_room: usize,
-    site2idx: &[usize],
+pub fn zone2area(
+    point2zone: &[usize],
+    num_zones: usize,
+    point2cell_idx: &[usize],
     idx2vtxv: &[usize],
-    vtxv2xy: &candle_core::Tensor,
+    voronoi_vertices_xy: &candle_core::Tensor,
 ) -> candle_core::Result<candle_core::Tensor> {
     let polygonmesh2_to_areas = polygonmesh2_to_areas::Layer {
-        elem2idx: Vec::<usize>::from(site2idx),
+        elem2idx: Vec::<usize>::from(point2cell_idx),
         idx2vtx: Vec::<usize>::from(idx2vtxv),
     };
-    let site2areas = vtxv2xy.apply_op1(polygonmesh2_to_areas)?;
+    let site2areas = voronoi_vertices_xy.apply_op1(polygonmesh2_to_areas)?;
     let site2areas = site2areas.reshape((site2areas.dim(0).unwrap(), 1))?;
 
-    let num_site = site2room.len();
+    let num_site = point2zone.len();
     let sum_sites_for_rooms = {
-        let mut sum_sites_for_rooms = vec![0f32; num_site * num_room];
+        let mut sum_sites_for_rooms = vec![0f32; num_site * num_zones];
         for i_site in 0..num_site {
-            let i_room = site2room[i_site];
-            if i_room == usize::MAX {
+            let i_zone = point2zone[i_site];
+            if i_zone == usize::MAX {
                 continue;
             }
-            assert!(i_room < num_room);
-            sum_sites_for_rooms[i_room * num_site + i_site] = 1f32;
+            assert!(i_zone < num_zones);
+            sum_sites_for_rooms[i_zone * num_site + i_site] = 1f32;
         }
         candle_core::Tensor::from_slice(
             &sum_sites_for_rooms,
-            candle_core::Shape::from_dims(&[num_room, num_site]),
+            candle_core::Shape::from_dims(&[num_zones, num_site]),
             &candle_core::Device::Cpu,
         )?
     };
@@ -144,59 +143,56 @@ pub fn room2area(
 }
 
 fn open_csv_with_header(path: &str, header: &str) -> anyhow::Result<BufWriter<std::fs::File>> {
-    let existed = Path::new(path).exists();
     let file = OpenOptions::new()
         .write(true)
-        .append(true)
         .create(true)
+        .truncate(true) // <-- ключевая строка
         .open(path)?;
-    let mut w = BufWriter::new(file);
 
-    // если файл новый или пустой — пишем header
-    if !existed || std::fs::metadata(path)?.len() == 0 {
-        writeln!(&mut w, "{}", header)?;
-        w.flush()?;
-    }
+    let mut w = BufWriter::new(file);
+    writeln!(&mut w, "{}", header)?;
+    w.flush()?;
     Ok(w)
 }
 
-pub fn optimize(
-    vtxl2xy: Vec<f32>,     // Границы полигона
-    site2xy: Vec<f32>,     // фиксация точек
-    site2room: Vec<usize>, // Принадлежность точки к комнате
-    site2xy2flag: Vec<f32>,
-    room2area_trg: Vec<f32>,
-    room_connections: Vec<(usize, usize)>,
-    room_forbidden: Vec<(usize, usize)>,
+pub fn optimize_zoning(
+    boundary_xy: Vec<f32>,         // Границы полигона
+    generator_points_xy: Vec<f32>, // фиксация точек
+    point2zone: Vec<usize>,        // Принадлежность точки к зоне
+    point_fixed_mask: Vec<f32>,
+    zone_target_area: Vec<f32>,
+    zone_neighbors: Vec<(usize, usize)>,
+    zone_forbidden: Vec<(usize, usize)>,
     write_logs: bool,
     run_name: String,
 ) -> anyhow::Result<(Vec<usize>, Vec<usize>, Vec<f32>, Vec<usize>)> {
-    let mut final_vtxv2xy = Vec::new();
-    let mut final_site2idx = Vec::new();
+
+    let mut final_voronoi_vertices_xy = Vec::new();
+    let mut final_point2cell_idx = Vec::new();
     let mut final_idx2vtxv = Vec::new();
     let mut final_edge2vtxv_wall = Vec::new();
 
-    let fixed_flags = site2xy2flag.iter().filter(|&&x| x != 0.0).count();
+    let fixed_flags = point_fixed_mask.iter().filter(|&&x| x != 0.0).count();
 
-    let num_room = room2area_trg.len();
-    let num_sites = site2room.len();
-    let mut room2fixed_sites: Vec<Vec<(f32, f32)>> = vec![vec![]; num_room];
+    let num_zones = zone_target_area.len();
+    let num_sites = point2zone.len();
+    let mut zone_fixed_points: Vec<Vec<(f32, f32)>> = vec![vec![]; num_zones];
 
     for i_site in 0..num_sites {
-        let room_idx = site2room[i_site];
-        let x_flag = site2xy2flag[i_site * 2];
-        let y_flag = site2xy2flag[i_site * 2 + 1];
+        let zone_idx = point2zone[i_site];
+        let x_flag = point_fixed_mask[i_site * 2];
+        let y_flag = point_fixed_mask[i_site * 2 + 1];
 
         if x_flag != 0.0 || y_flag != 0.0 {
-            let x = site2xy[i_site * 2];
-            let y = site2xy[i_site * 2 + 1];
-            room2fixed_sites[room_idx].push((x, y));
+            let x = generator_points_xy[i_site * 2];
+            let y = generator_points_xy[i_site * 2 + 1];
+            zone_fixed_points[zone_idx].push((x, y));
         }
     }
 
     // +++ список “двигающихся” сайтов: у кого обе компоненты флага == 0
     let movable_sites: Vec<usize> = (0..num_sites)
-        .filter(|&i| site2xy2flag[i * 2] == 0.0 && site2xy2flag[i * 2 + 1] == 0.0)
+        .filter(|&i| point_fixed_mask[i * 2] == 0.0 && point_fixed_mask[i * 2 + 1] == 0.0)
         .collect();
 
     let mut loss_writer: Option<BufWriter<std::fs::File>> = None;
@@ -211,37 +207,40 @@ pub fn optimize(
             "iter,loss_each_area,loss_total_area,loss_walllen,loss_topo,loss_fix,loss_lloyd,loss_group_fix,lr",
         )?);
 
-        sites_writer = Some(open_csv_with_header(&sites_path, "iter,site,x,y")?);
+        sites_writer = Some(open_csv_with_header(&sites_path, "iter,site,zone,x,y")?);
     }
 
-    let site2xy = candle_core::Var::from_slice(
-        &site2xy,
-        candle_core::Shape::from_dims(&[site2xy.len() / 2, 2]),
+    let generator_points_xy = candle_core::Var::from_slice(
+        &generator_points_xy,
+        candle_core::Shape::from_dims(&[generator_points_xy.len() / 2, 2]),
         &candle_core::Device::Cpu,
     )
     .unwrap();
 
-    let site2xy2flag = candle_core::Var::from_slice(
-        &site2xy2flag,
-        candle_core::Shape::from_dims(&[site2xy2flag.len() / 2, 2]),
+    let point_fixed_mask = candle_core::Var::from_slice(
+        &point_fixed_mask,
+        candle_core::Shape::from_dims(&[point_fixed_mask.len() / 2, 2]),
         &candle_core::Device::Cpu,
     )
     .unwrap();
 
-    let site2xy_ini = candle_core::Tensor::from_vec(
-        site2xy.flatten_all().unwrap().to_vec1::<f32>()?,
-        candle_core::Shape::from_dims(&[site2xy.dims2()?.0, 2usize]),
+    let generator_points_xy_ini = candle_core::Tensor::from_vec(
+        generator_points_xy
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()?,
+        candle_core::Shape::from_dims(&[generator_points_xy.dims2()?.0, 2usize]),
         &candle_core::Device::Cpu,
     )
     .unwrap();
 
-    assert_eq!(site2room.len(), site2xy.dims2()?.0);
+    assert_eq!(point2zone.len(), generator_points_xy.dims2()?.0);
 
-    let room2area_trg = {
-        let num_room = room2area_trg.len();
+    let zone_target_area = {
+        let num_zones = zone_target_area.len();
         candle_core::Tensor::from_vec(
-            room2area_trg,
-            candle_core::Shape::from_dims(&[num_room, 1]),
+            zone_target_area,
+            candle_core::Shape::from_dims(&[num_zones, 1]),
             &candle_core::Device::Cpu,
         )
         .unwrap()
@@ -252,65 +251,70 @@ pub fn optimize(
         ..Default::default()
     };
     use candle_nn::Optimizer;
-    let mut optimizer = candle_nn::AdamW::new(vec![site2xy.clone()], adamw_params)?;
+    let mut zoning_optimizer =
+        candle_nn::AdamW::new(vec![generator_points_xy.clone()], adamw_params)?;
 
-    let n_sites = site2room.len();
-    let base_iter = 150;
-    let max_iter = 400;
-    let mut n_iter = base_iter + ((n_sites.saturating_sub(10) * (max_iter - base_iter)) / 50);
+    let n_sites = point2zone.len();
+    let base_iterations = 250;
+    let max_iterations = 600;
+    let mut num_iterations =
+        base_iterations + ((n_sites.saturating_sub(10) * (max_iterations - base_iterations)) / 50);
 
     if fixed_flags > 0 {
-        n_iter = (n_iter as f32 * 1.1).round() as usize;
+        num_iterations = (num_iterations as f32 * 1.1).round() as usize;
     }
 
     let max_lr = 0.08;
     let min_lr = 0.002;
-    let decay_start = n_iter / 3;
+    let lr_decay_start_iter = num_iterations / 3;
 
-    for _iter in 0..n_iter {
-        let current_lr = if _iter < decay_start {
+    for iter_idx in 0..num_iterations {
+        let learning_rate = if iter_idx < lr_decay_start_iter {
             max_lr
         } else {
-            let decay_progress = (_iter - decay_start) as f32 / (n_iter - decay_start) as f32;
+            let decay_progress = (iter_idx - lr_decay_start_iter) as f32
+                / (num_iterations - lr_decay_start_iter) as f32;
             min_lr
                 + 0.5 * (max_lr - min_lr) * (1.0 + f32::cos(std::f32::consts::PI * decay_progress))
         };
 
-        optimizer.set_params(candle_nn::ParamsAdamW {
-            lr: current_lr as f64,
+        zoning_optimizer.set_params(candle_nn::ParamsAdamW {
+            lr: learning_rate as f64,
             beta2: 0.95,
             ..Default::default()
         });
 
-        let (vtxv2xy, voronoi_info) =
-            voronoi2::voronoi(&vtxl2xy, &site2xy, |i_site| site2room[i_site] != usize::MAX);
-        let edge2vtxv_wall = edge2vtvx_wall(&voronoi_info, &site2room);
+        let (voronoi_vertices_xy, voronoi_info) =
+            voronoi2::voronoi(&boundary_xy, &generator_points_xy, |i_site| {
+                point2zone[i_site] != usize::MAX
+            });
+        let edge2vtxv_wall = edge2vtvx_wall(&voronoi_info, &point2zone);
 
         let (loss_each_area, loss_total_area) = {
-            let room2area = room2area(
-                &site2room,
-                room2area_trg.dims2()?.0,
-                &voronoi_info.site2idx,
-                &voronoi_info.idx2vtxv,
-                &vtxv2xy,
+            let zone2area = zone2area(
+                &point2zone,
+                zone_target_area.dims2()?.0,
+                &voronoi_info.point2cell_idx,
+                &voronoi_info.cell_idx2vertex_idx,
+                &voronoi_vertices_xy,
             )?;
             /*
             {
-                let room2area = room2area.flatten_all()?.to_vec1::<f32>()?;
-                let total_area = del_msh::polyloop2::area_(&vtxl2xy);
-                for i_room in 0..room2area.len() {
-                    println!("    room:{} area:{}", i_room, room2area[i_room]/total_area);
+                let zone2area = zone2area.flatten_all()?.to_vec1::<f32>()?;
+                let total_area = del_msh::polyloop2::area_(&boundary_xy);
+                for i_zone in 0..zone2area.len() {
+                    println!("    room:{} area:{}", i_zone, zone2area[i_zone]/total_area);
                 }
             }
              */
-            let loss_each_area = room2area.sub(&room2area_trg)?.sqr()?.sum_all()?;
-            let total_area_trg = del_msh_core::polyloop2::area(&vtxl2xy);
+            let loss_each_area = zone2area.sub(&zone_target_area)?.sqr()?.sum_all()?;
+            let total_area_trg = del_msh_core::polyloop2::area(&boundary_xy);
             let total_area_trg = candle_core::Tensor::from_vec(
                 vec![total_area_trg],
                 candle_core::Shape::from_dims(&[]),
                 &candle_core::Device::Cpu,
             )?;
-            let loss_total_area = (room2area.sum_all()? - total_area_trg)?.abs()?;
+            let loss_total_area = (zone2area.sum_all()? - total_area_trg)?.abs()?;
             (loss_each_area, loss_total_area)
         };
         // println!("  loss each_area {}", loss_each_area.to_vec0::<f32>()?);
@@ -319,38 +323,40 @@ pub fn optimize(
             let vtx2xyz_to_edgevector = vtx2xyz_to_edgevector::Layer {
                 edge2vtx: Vec::<usize>::from(edge2vtxv_wall.clone()),
             };
-            let edge2xy = vtxv2xy.apply_op1(vtx2xyz_to_edgevector)?;
+            let edge2xy = voronoi_vertices_xy.apply_op1(vtx2xyz_to_edgevector)?;
             // edge2xy.abs()?.affine(1.0,1.0)?.sqr()?.sum_all()?
             edge2xy.abs()?.sum_all()?
         };
 
         let loss_topo = loss_topo::compute_topo_loss(
-            &site2xy,
-            &site2room,
-            room2area_trg.dims2()?.0,
+            &generator_points_xy,
+            &point2zone,
+            zone_target_area.dims2()?.0,
             &voronoi_info,
-            &room_connections,
-            &room_forbidden,
+            &zone_neighbors,
         )?;
 
-        let loss_group_fix =
-            loss_topo::compute_group_fix_loss(&site2xy, &room2fixed_sites, &site2room)?;
+        let loss_group_fix = loss_topo::compute_group_fix_loss(
+            &generator_points_xy,
+            &zone_fixed_points,
+            &point2zone,
+        )?;
         // println!("  loss topo: {}", loss_topo.to_vec0::<f32>()?);
-        // let loss_fix = site2xy.sub(&site2xy_ini)?.mul(&site2xy2flag)?.sum_all()?;
-        // let loss_fix = site2xy.sub(&site2xy_ini)?.mul(&site2xy2flag)?.sum_all()?;
+        // let loss_fix = generator_points_xy.sub(&generator_points_xy_ini)?.mul(&point_fixed_mask)?.sum_all()?;
+        // let loss_fix = generator_points_xy.sub(&generator_points_xy_ini)?.mul(&point_fixed_mask)?.sum_all()?;
 
-        let loss_fix = site2xy
-            .sub(&site2xy_ini)?
-            .mul(&site2xy2flag)?
+        let loss_fix = generator_points_xy
+            .sub(&generator_points_xy_ini)?
+            .mul(&point_fixed_mask)?
             .sqr()?
             .sqr()?
             .sum_all()?;
 
         let loss_lloyd = voronoi2::loss_lloyd(
-            &voronoi_info.site2idx,
-            &voronoi_info.idx2vtxv,
-            &site2xy,
-            &vtxv2xy,
+            &voronoi_info.point2cell_idx,
+            &voronoi_info.cell_idx2vertex_idx,
+            &generator_points_xy,
+            &voronoi_vertices_xy,
         )?;
 
         let loss_each_area = loss_each_area.affine(50000.0, 0.0)?.clone();
@@ -366,7 +372,7 @@ pub fn optimize(
                 writeln!(
                     w,
                     "{},{},{},{},{},{},{},{},{}",
-                    _iter,
+                    iter_idx,
                     loss_each_area.to_vec0::<f32>()?,
                     loss_total_area.to_vec0::<f32>()?,
                     loss_walllen.to_vec0::<f32>()?,
@@ -374,16 +380,17 @@ pub fn optimize(
                     loss_fix.to_vec0::<f32>()?,
                     loss_lloyd.to_vec0::<f32>()?,
                     loss_group_fix.to_vec0::<f32>()?,
-                    current_lr,
+                    learning_rate,
                 )?;
             }
 
             if let Some(w) = sites_writer.as_mut() {
-                let xy = site2xy.flatten_all()?.to_vec1::<f32>()?;
+                let xy = generator_points_xy.flatten_all()?.to_vec1::<f32>()?;
                 for &i_site in &movable_sites {
                     let x = xy[i_site * 2];
                     let y = xy[i_site * 2 + 1];
-                    writeln!(w, "{},{},{},{}", _iter, i_site, x, y)?;
+                    let room = point2zone[i_site];
+                    writeln!(w, "{},{},{},{},{}", iter_idx, i_site, room, x, y)?;
                 }
             }
         }
@@ -396,12 +403,12 @@ pub fn optimize(
             + loss_lloyd
             + loss_group_fix)?;
 
-        optimizer.backward_step(&loss)?;
+        zoning_optimizer.backward_step(&loss)?;
 
-        if _iter == n_iter - 1 {
-            final_site2idx = voronoi_info.site2idx;
-            final_idx2vtxv = voronoi_info.idx2vtxv;
-            final_vtxv2xy = vtxv2xy.flatten_all()?.to_vec1::<f32>()?;
+        if iter_idx == num_iterations - 1 {
+            final_point2cell_idx = voronoi_info.point2cell_idx;
+            final_idx2vtxv = voronoi_info.cell_idx2vertex_idx;
+            final_voronoi_vertices_xy = voronoi_vertices_xy.flatten_all()?.to_vec1::<f32>()?;
             final_edge2vtxv_wall = edge2vtxv_wall.clone();
         }
     }
@@ -414,9 +421,9 @@ pub fn optimize(
     }
 
     Ok((
-        final_site2idx,
+        final_point2cell_idx,
         final_idx2vtxv,
-        final_vtxv2xy,
+        final_voronoi_vertices_xy,
         final_edge2vtxv_wall,
     ))
 }

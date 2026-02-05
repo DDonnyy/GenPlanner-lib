@@ -14,7 +14,7 @@ fn topology(
             if i_room == usize::MAX {
                 return usize::MAX;
             }
-            let j_site = voronoi_info.idx2site[voronoi_info.site2idx[i_site] + i_face];
+            let j_site = voronoi_info.idx2site[voronoi_info.point2cell_idx[i_site] + i_face];
             if j_site == usize::MAX {
                 return usize::MAX;
             }
@@ -26,7 +26,7 @@ fn topology(
             return j_site;
         };
         del_msh_core::elem2group::from_polygon_mesh(
-            &voronoi_info.site2idx[..],
+            &voronoi_info.point2cell_idx[..],
             siteface2adjsitesameroom,
         )
     };
@@ -92,8 +92,8 @@ fn is_two_room_connected(
 ) -> bool {
     let mut is_connected = false;
     for &i_site in room2site[i0_room].iter() {
-        for &j_site in
-            &voronoi_info.idx2site[voronoi_info.site2idx[i_site]..voronoi_info.site2idx[i_site + 1]]
+        for &j_site in &voronoi_info.idx2site
+            [voronoi_info.point2cell_idx[i_site]..voronoi_info.point2cell_idx[i_site + 1]]
         {
             if j_site == usize::MAX {
                 continue;
@@ -133,47 +133,6 @@ fn find_nearest_site(
     pair
 }
 
-fn find_nearest_adjacent_sites(
-    i0_room: usize,
-    i1_room: usize,
-    site2room: &[usize],
-    room2site: &Vec<Vec<usize>>,
-    voronoi_info: &VoronoiInfo,
-    site2xy0: &[f32],
-) -> Option<(usize, usize)> {
-    let mut best_i = usize::MAX;
-    let mut best_j = usize::MAX;
-    let mut best_d2 = f32::INFINITY;
-
-    for &i_site in room2site[i0_room].iter() {
-        let i_beg = voronoi_info.site2idx[i_site];
-        let i_end = voronoi_info.site2idx[i_site + 1];
-        for &j_site in &voronoi_info.idx2site[i_beg..i_end] {
-            if j_site == usize::MAX {
-                continue;
-            }
-            if site2room[j_site] != i1_room {
-                continue;
-            }
-            let pi = del_msh_core::vtx2xy::to_vec2(site2xy0, i_site);
-            let pj = del_msh_core::vtx2xy::to_vec2(site2xy0, j_site);
-            let d = v2(pi) - v2(pj);
-            let d2 = d.dot(&d);
-            if d2 < best_d2 {
-                best_d2 = d2;
-                best_i = i_site;
-                best_j = j_site;
-            }
-        }
-    }
-
-    if best_i == usize::MAX {
-        None
-    } else {
-        Some((best_i, best_j))
-    }
-}
-
 #[inline]
 fn v2(p: &[f32; 2]) -> Vector2<f32> {
     Vector2::new(p[0], p[1])
@@ -185,7 +144,6 @@ pub fn compute_topo_loss(
     num_room: usize,
     voronoi_info: &VoronoiInfo,
     room_connections: &Vec<(usize, usize)>,
-    room_forbidden: &Vec<(usize, usize)>,
 ) -> Result<Tensor> {
     let num_site = site2xy.dims2()?.0;
     let (num_group, site2group, room2group) = topology(voronoi_info, num_room, site2room);
@@ -231,7 +189,9 @@ pub fn compute_topo_loss(
                 for &j_group in room2group[i_room].iter() {
                     for &j_site in &group2site[j_group] {
                         // this site has cell
-                        if voronoi_info.site2idx[j_site + 1] > voronoi_info.site2idx[j_site] {
+                        if voronoi_info.point2cell_idx[j_site + 1]
+                            > voronoi_info.point2cell_idx[j_site]
+                        {
                             i_group = j_group;
                             break;
                         }
@@ -274,54 +234,6 @@ pub fn compute_topo_loss(
                     site2xytrg[j_site * 2 + 0] = pi_min[0];
                     site2xytrg[j_site * 2 + 1] = pi_min[1];
                 }
-            }
-        }
-    }
-
-    // FORBID: push apart forbidden adjacent rooms (only when both rooms are in one piece)
-
-    let push = 0.02_f32;
-
-    for &(a_room, b_room) in room_forbidden.iter() {
-        if a_room >= num_room || b_room >= num_room || a_room == b_room {
-            continue;
-        }
-        // avoid fighting with split-fix (and avoid weird behavior when room has multiple groups)
-        if room2group[a_room].len() != 1 || room2group[b_room].len() != 1 {
-            continue;
-        }
-
-        let is_connected =
-            is_two_room_connected(a_room, b_room, site2room, &room2site, voronoi_info);
-        if !is_connected {
-            continue; // nothing to fix
-        }
-
-        // pick an actually adjacent pair of sites across the boundary
-        if let Some((a_site, b_site)) = find_nearest_adjacent_sites(
-            a_room,
-            b_room,
-            site2room,
-            &room2site,
-            voronoi_info,
-            &site2xy0,
-        ) {
-            let pa = del_msh_core::vtx2xy::to_vec2(&site2xy0, a_site);
-            let pb = del_msh_core::vtx2xy::to_vec2(&site2xy0, b_site);
-            let mut d = v2(pa) - v2(pb);
-            let n = d.norm();
-            if n > 1e-8 {
-                d /= n;
-
-                // move both away (symmetric)
-                let ta = v2(pa) + d * (0.5 * push);
-                let tb = v2(pb) - d * (0.5 * push);
-
-                // optional clamp if you use normalized coords
-                site2xytrg[a_site * 2 + 0] = ta[0].clamp(0.0, 1.0);
-                site2xytrg[a_site * 2 + 1] = ta[1].clamp(0.0, 1.0);
-                site2xytrg[b_site * 2 + 0] = tb[0].clamp(0.0, 1.0);
-                site2xytrg[b_site * 2 + 1] = tb[1].clamp(0.0, 1.0);
             }
         }
     }
