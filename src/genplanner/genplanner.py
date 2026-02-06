@@ -72,7 +72,7 @@ class GenPlanner:
 
     def _exclude_features(self, gdf, exclude_features, simplify_geometry, simplify_value):
         exclude_features = exclude_features.to_crs(self.local_crs)
-        exclude_features = exclude_features.clip(self.original_territory.to_crs(self.local_crs), keep_geom_type=True)
+        exclude_features = exclude_features.clip(gdf, keep_geom_type=True)
         exclude_features.geometry = exclude_features.geometry.buffer(1, resolution=2)
         exclude_features = gpd.GeoDataFrame(geometry=[exclude_features.union_all()], crs=exclude_features.crs)
         if simplify_geometry:
