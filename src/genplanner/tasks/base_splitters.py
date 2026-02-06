@@ -6,7 +6,7 @@ from shapely import Point
 from shapely.geometry import LineString, MultiPolygon, Polygon
 
 from genplanner._config import config
-from genplanner._rust import optimize_space
+from genplanner._rust import optimize_territory_zoning
 from genplanner.utils import (
     denormalize_coords,
     generate_points,
@@ -176,7 +176,7 @@ def _split_polygon(
                 site2xy2flag.extend([1.0, 1.0])  # флаг фиксации
                 site2room.append(room_idx)
 
-            res = optimize_space(
+            res = optimize_territory_zoning(
                 vtxl2xy=normalized_border,
                 site2xy=site2xy,
                 site2room=site2room,

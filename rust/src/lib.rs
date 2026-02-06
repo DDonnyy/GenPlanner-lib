@@ -9,6 +9,8 @@ use crate::voronoi2::VoronoiInfo;
 use pyo3::prelude::*;
 use std::panic;
 
+use crate::loss_topo::edge2vtvx_forbidden_wall;
+use candle_core::{DType, Tensor};
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
 
@@ -166,7 +168,6 @@ pub fn optimize_zoning(
     write_logs: bool,
     run_name: String,
 ) -> anyhow::Result<(Vec<usize>, Vec<usize>, Vec<f32>, Vec<usize>)> {
-
     let mut final_voronoi_vertices_xy = Vec::new();
     let mut final_point2cell_idx = Vec::new();
     let mut final_idx2vtxv = Vec::new();
@@ -204,7 +205,7 @@ pub fn optimize_zoning(
 
         loss_writer = Some(open_csv_with_header(
             &loss_path,
-            "iter,loss_each_area,loss_total_area,loss_walllen,loss_topo,loss_fix,loss_lloyd,loss_group_fix,lr",
+            "iter,loss_each_area,loss_total_area,loss_walllen,loss_topo,loss_fix,loss_lloyd,loss_group_fix,loss_forbidden,lr",
         )?);
 
         sites_writer = Some(open_csv_with_header(&sites_path, "iter,site,zone,x,y")?);
@@ -255,8 +256,8 @@ pub fn optimize_zoning(
         candle_nn::AdamW::new(vec![generator_points_xy.clone()], adamw_params)?;
 
     let n_sites = point2zone.len();
-    let base_iterations = 250;
-    let max_iterations = 600;
+    let base_iterations = 1000;
+    let max_iterations = 2000;
     let mut num_iterations =
         base_iterations + ((n_sites.saturating_sub(10) * (max_iterations - base_iterations)) / 50);
 
@@ -264,9 +265,9 @@ pub fn optimize_zoning(
         num_iterations = (num_iterations as f32 * 1.1).round() as usize;
     }
 
-    let max_lr = 0.08;
+    let max_lr = 0.1;
     let min_lr = 0.002;
-    let lr_decay_start_iter = num_iterations / 3;
+    let lr_decay_start_iter = num_iterations / 2;
 
     for iter_idx in 0..num_iterations {
         let learning_rate = if iter_idx < lr_decay_start_iter {
@@ -289,6 +290,30 @@ pub fn optimize_zoning(
                 point2zone[i_site] != usize::MAX
             });
         let edge2vtxv_wall = edge2vtvx_wall(&voronoi_info, &point2zone);
+
+        let loss_walllen = {
+            let vtx2xyz_to_edgevector = vtx2xyz_to_edgevector::Layer {
+                edge2vtx: Vec::<usize>::from(edge2vtxv_wall.clone()),
+            };
+            let edge2xy = voronoi_vertices_xy.apply_op1(vtx2xyz_to_edgevector)?;
+            edge2xy.abs()?.sum_all()?
+        };
+
+        let edge2vtxv_forbidden =
+            edge2vtvx_forbidden_wall(&voronoi_info, &point2zone, &zone_forbidden);
+
+        let loss_forbidden_walllen = {
+            if edge2vtxv_forbidden.is_empty() {
+                Tensor::zeros((), DType::F32, generator_points_xy.device())?
+            } else {
+                let op = vtx2xyz_to_edgevector::Layer {
+                    edge2vtx: edge2vtxv_forbidden.clone(),
+                };
+                let edge2xy = voronoi_vertices_xy.apply_op1(op)?;
+                // edge2xy.abs()?.sum_all()?
+                edge2xy.sqr()?.sum_all()?
+            }
+        };
 
         let (loss_each_area, loss_total_area) = {
             let zone2area = zone2area(
@@ -319,14 +344,6 @@ pub fn optimize_zoning(
         };
         // println!("  loss each_area {}", loss_each_area.to_vec0::<f32>()?);
         // println!("  loss total_area {}", loss_total_area.to_vec0::<f32>()?);
-        let loss_walllen = {
-            let vtx2xyz_to_edgevector = vtx2xyz_to_edgevector::Layer {
-                edge2vtx: Vec::<usize>::from(edge2vtxv_wall.clone()),
-            };
-            let edge2xy = voronoi_vertices_xy.apply_op1(vtx2xyz_to_edgevector)?;
-            // edge2xy.abs()?.affine(1.0,1.0)?.sqr()?.sum_all()?
-            edge2xy.abs()?.sum_all()?
-        };
 
         let loss_topo = loss_topo::compute_topo_loss(
             &generator_points_xy,
@@ -366,12 +383,13 @@ pub fn optimize_zoning(
         let loss_fix = loss_fix.affine(10000000., 0.0)?;
         let loss_lloyd = loss_lloyd.affine(120.0, 0.0)?;
         let loss_group_fix = loss_group_fix.affine(80.0, 0.0)?;
+        let loss_forbidden_walllen = loss_forbidden_walllen.affine(2000.0, 0.0)?;
 
         if write_logs {
             if let Some(w) = loss_writer.as_mut() {
                 writeln!(
                     w,
-                    "{},{},{},{},{},{},{},{},{}",
+                    "{},{},{},{},{},{},{},{},{},{}",
                     iter_idx,
                     loss_each_area.to_vec0::<f32>()?,
                     loss_total_area.to_vec0::<f32>()?,
@@ -380,6 +398,7 @@ pub fn optimize_zoning(
                     loss_fix.to_vec0::<f32>()?,
                     loss_lloyd.to_vec0::<f32>()?,
                     loss_group_fix.to_vec0::<f32>()?,
+                    loss_forbidden_walllen.to_vec0::<f32>()?,
                     learning_rate,
                 )?;
             }
@@ -401,7 +420,8 @@ pub fn optimize_zoning(
             + loss_topo
             + loss_fix
             + loss_lloyd
-            + loss_group_fix)?;
+            + loss_group_fix
+            + loss_forbidden_walllen)?;
 
         zoning_optimizer.backward_step(&loss)?;
 

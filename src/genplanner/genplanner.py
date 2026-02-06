@@ -1,5 +1,6 @@
 import concurrent.futures
 import multiprocessing
+import os
 import time
 
 import geopandas as gpd
@@ -40,6 +41,8 @@ class GenPlanner:
         simplify_geometry: bool = True,
         simplify_value=1,
         parallel=True,
+        parallel_max_workers=None,
+        rust_write_logs=False,
     ):
         self.original_territory = features.copy()
         self.original_crs = features.crs
@@ -66,9 +69,27 @@ class GenPlanner:
             existing_tz_merge_radius,
         )
 
-        self.dev_mode = not parallel
-        if self.dev_mode:
-            logger.info("Dev mode activated, no more ProcessPool")
+        self.parallel = bool(parallel)
+        self.rust_write_logs = bool(rust_write_logs)
+
+        cpu_total = os.cpu_count() or 1
+
+        if not self.parallel:
+            self.parallel_max_workers = 1
+            logger.info("GenPlanner: parallel execution disabled (ProcessPoolExecutor off).")
+        else:
+            if parallel_max_workers is None:
+                self.parallel_max_workers = max(1, cpu_total - 1)
+                logger.debug(
+                    f"GenPlanner: parallel execution enabled | workers={self.parallel_max_workers} (auto) | cpu_total={cpu_total}"
+                )
+            else:
+                self.parallel_max_workers = max(1, int(parallel_max_workers))
+                logger.debug(
+                    f"GenPlanner: parallel execution enabled | workers={self.parallel_max_workers} (manual) | cpu_total={cpu_total}"
+                )
+        if self.rust_write_logs:
+            logger.info("GenPlanner: Rust optimizer logs enabled.")
 
     def _exclude_features(self, gdf, exclude_features, simplify_geometry, simplify_value):
         exclude_features = exclude_features.to_crs(self.local_crs)
@@ -223,9 +244,12 @@ class GenPlanner:
 
     def _run(self, initial_func, *args, **kwargs):
         task_queue = multiprocessing.Queue()
-        kwargs.update({"dev_mode": self.dev_mode})
+        kwargs.update({"parallel": self.parallel, "rust_write_logs": self.rust_write_logs})
+
         task_queue.put((initial_func, args, kwargs))
-        generated_zones, generated_roads = parallel_split_queue(task_queue, self.local_crs, dev=self.dev_mode)
+        generated_zones, generated_roads = split_queue(
+            task_queue, self.local_crs, parallel=self.parallel, max_workers=self.parallel_max_workers
+        )
 
         complete_zones = pd.concat([generated_zones, self.existing_terr_zones], ignore_index=True)
 
@@ -358,30 +382,18 @@ class GenPlanner:
             return self._run(multi_feature2terr_zones_initial, *args)
         return self._run(feature2terr_zones_initial, *args)
 
-    # def poly2func(self, genplan: GenPlan = gen_plan) -> (gpd.GeoDataFrame, gpd.GeoDataFrame):
-    #     if self.source_multipolygon:
-    #         raise NotImplementedError("Multipolygon source is not supported yet")
-    #     return self._run(
-    #         poly2func2terr2block_initial, self.territory_to_work_with, genplan, False, local_crs=self.local_crs
-    #     )
-    #
-    # def poly2func2terr2block(self, genplan: GenPlan = gen_plan) -> (gpd.GeoDataFrame, gpd.GeoDataFrame):
-    #     if self.source_multipolygon:
-    #         raise NotImplementedError("Multipolygon source is not supported yet")
-    #     return self._run(
-    #         poly2func2terr2block_initial, self.territory_to_work_with, genplan, True, local_crs=self.local_crs
-    #     )
 
-
-def parallel_split_queue(
-    task_queue: multiprocessing.Queue, local_crs, dev=False
+def split_queue(
+    task_queue: multiprocessing.Queue, local_crs, parallel, max_workers
 ) -> (gpd.GeoDataFrame, gpd.GeoDataFrame):
     splitted = []
     roads_all = []
-    if dev:
+
+    if not parallel:
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     else:
-        executor = concurrent.futures.ProcessPoolExecutor()
+        executor = concurrent.futures.ProcessPoolExecutor(max_workers)
+
     with executor:
         future_to_task = {}
         while True:

@@ -59,8 +59,8 @@ fn problem() -> (
     let room2area_trg = vec![
         0.09799259, 0.09799259, 0.09799259, 0.09799259, 0.09799259, 0.04355226,
     ];
-    let room_connections = vec![];
-    let room_forbidden = vec![(0,1)];
+    let room_connections = vec![(0,3)];
+    let room_forbidden = vec![(0,4),(0,1),(0,5),(0,2)];
     (
         vtxl2xy,
         site2xy,

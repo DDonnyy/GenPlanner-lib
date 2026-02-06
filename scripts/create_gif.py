@@ -2,21 +2,51 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+import imageio.v2 as imageio
+import matplotlib
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-
-from shapely.geometry import Point, Polygon, MultiPoint
+from shapely.geometry import MultiPoint, Point, Polygon
 from shapely.ops import voronoi_diagram
 from shapely.strtree import STRtree
-
-import matplotlib.pyplot as plt
-import imageio.v2 as imageio
-
-
 from tqdm.contrib.concurrent import process_map
 
-import matplotlib
 matplotlib.use("Agg")
+
+RUN_NAME = "test_run"
+
+CSV_PATH = Path(f"../rust/{RUN_NAME}_sites.csv")
+OUT_GIF = "./run.gif"
+
+LOSS_CSV_PATH = Path(f"../rust/{RUN_NAME}.csv")
+LOSS_COLUMNS = None
+LOSS_YSCALE = "linear"  # "linear" / "log" / "symlog"
+
+FPS = 60
+DPI = 80
+
+
+ZONE_ID_TO_NAME = {
+    0: "residential",
+    1: "industrial",
+    2: "business",
+    3: "recreation",
+    4: "transport",
+    5: "agriculture",
+    6: "special",
+}
+
+
+ZONE_COLORS = {
+    "residential": "#FFD700",
+    "industrial": "#6A5ACD",
+    "business": "#FF8C00",
+    "recreation": "#ADFF2F",
+    "transport": "#A9A9A9",
+    "agriculture": "#20B2AA",
+    "special": "#8B4513",
+}
 
 
 BOUNDARY_XY_FLAT = [
@@ -92,39 +122,6 @@ BOUNDARY_XY_FLAT = [
     0.44495219,
 ]
 
-RUN_NAME = "test_run"
-
-CSV_PATH = Path(f"../rust/{RUN_NAME}_sites.csv")
-OUT_GIF = "./run.gif"
-
-LOSS_CSV_PATH = Path(f"../rust/{RUN_NAME}.csv")
-LOSS_COLUMNS = None
-LOSS_YSCALE = "symlog"  # "linear" / "log" / "symlog"
-
-FPS = 30
-DPI = 100
-
-ZONE_ID_TO_NAME = {
-    0: "residential",
-    1: "industrial",
-    2: "business",
-    3: "recreation",
-    4: "transport",
-    5: "agriculture",
-    6: "special",
-}
-
-
-ZONE_COLORS = {
-    "residential": "#FFD700",
-    "industrial": "#6A5ACD",
-    "business": "#FF8C00",
-    "recreation": "#ADFF2F",
-    "transport": "#A9A9A9",
-    "agriculture": "#20B2AA",
-    "special": "#8B4513",
-}
-
 
 @dataclass
 class Config:
@@ -183,12 +180,6 @@ def load_loss_csv(loss_csv_path: Path) -> pd.DataFrame:
 
 
 def build_dense_tracks(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """
-    iters: (T,)
-    sites: (N,)
-    xy: (T, N, 2) — координаты всех сайтов на каждой итерации (ffill/bfill)
-    zone: (N,) — принадлежность сайта к зоне (берём first по site)
-    """
     iters = np.sort(df["iter"].unique())
     sites = np.sort(df["site"].unique())
 
@@ -268,6 +259,22 @@ def assign_polygons_to_points(polys: list[Polygon], points: list[Point]) -> dict
     return assignment
 
 
+def _iter_polygons(g):
+    if g is None or g.is_empty:
+        return
+    gt = g.geom_type
+    if gt == "Polygon":
+        yield g
+    elif gt == "MultiPolygon":
+        for p in g.geoms:
+            if not p.is_empty:
+                yield p
+    elif gt == "GeometryCollection":
+        for gg in g.geoms:
+            if gg.geom_type in ("Polygon", "MultiPolygon") and (not gg.is_empty):
+                yield from _iter_polygons(gg)
+
+
 def render_frame(
     boundary: Polygon,
     points_xy: np.ndarray,  # (N, 2)
@@ -275,7 +282,6 @@ def render_frame(
     zone_id_to_name: dict[int, str],
     zone_colors: dict[str, str],
     out_path: str,
-    title: str,
     dpi: int,
     xlim=None,
     ylim=None,
@@ -293,11 +299,10 @@ def render_frame(
         ncols=1,
         figsize=(8, 10),
         dpi=dpi,
-        gridspec_kw={"height_ratios": [3, 1]},
+        gridspec_kw={"height_ratios": [3, 2]},
     )
 
     ax.set_aspect("equal", adjustable="box")
-    ax.set_title(title)
 
     # 1 полигон на 1 сайт
     for i, pt in enumerate(points):
@@ -306,21 +311,36 @@ def render_frame(
         zone_name = zone_id_to_name.get(zone_id, f"zone_{zone_id}")
         color = zone_colors.get(zone_name)
 
-        xs, ys = poly.exterior.xy
-        ax.fill(xs, ys, alpha=0.75, linewidth=0.6, color=color)
-        ax.plot(xs, ys, linewidth=0.6, color="black")
+        clipped = poly.intersection(boundary)
+        for p in _iter_polygons(clipped):
+            xs, ys = p.exterior.xy
+            ax.fill(xs, ys, alpha=0.75, linewidth=0.6, color=color, zorder=1)
+            ax.plot(xs, ys, linewidth=0.6, color="black", zorder=2)
+
+            # если хочешь белые дырки внутри полигона:
+            for hole in p.interiors:
+                hx, hy = hole.xy
+                ax.fill(hx, hy, color="white", linewidth=0, zorder=1)
 
     # boundary
     bx, by = boundary.exterior.xy
     ax.plot(bx, by, linewidth=2.0, color="black")
 
-    ax.scatter(points_xy[:, 0], points_xy[:, 1], s=10, color="black")
+    point_colors = []
+    for i in range(len(points)):
+        zone_id = int(zone_per_site[i])
+        zone_name = zone_id_to_name.get(zone_id, f"zone_{zone_id}")
+        point_colors.append(zone_colors.get(zone_name, "#CCCCCC"))
 
-    # minx, miny, maxx, maxy = boundary.bounds
-    # padx = (maxx - minx) * 0.02 if maxx > minx else 1.0
-    # pady = (maxy - miny) * 0.02 if maxy > miny else 1.0
-    # ax.set_xlim(minx - padx, maxx + padx)
-    # ax.set_ylim(miny - pady, maxy + pady)
+    ax.scatter(
+        points_xy[:, 0],
+        points_xy[:, 1],
+        s=30,
+        c=point_colors,
+        edgecolors="black",
+        linewidths=0.6,
+        zorder=5,
+    )
 
     if xlim is not None:
         ax.set_xlim(*xlim)
@@ -334,13 +354,43 @@ def render_frame(
         if loss_cols is None:
             loss_cols = [c for c in loss_df.columns if c.startswith("loss_")]
 
-        # рисуем весь график (фон)
         x_all = loss_df["iter"].to_numpy()
+
+        all_losses = []
+
         for c in loss_cols:
             y_all = loss_df[c].to_numpy()
             ax_loss.plot(x_all, y_all, linewidth=1.0, alpha=0.6, label=c)
+            y_all = y_all[np.isfinite(y_all)]
+            if y_all.size > 0:
+                all_losses.append(y_all)
 
-        # выделяем текущую итерацию
+        if all_losses:
+            all_losses = np.concatenate(all_losses)
+            y_top = float(np.percentile(all_losses, 98))
+        else:
+            y_top = 1.0
+
+        if "lr" in loss_df.columns:
+            lr = loss_df["lr"].to_numpy().astype(float)
+
+            lr_min = float(np.nanmin(lr))
+            lr_max = float(np.nanmax(lr))
+
+            if np.isfinite(lr_min) and np.isfinite(lr_max) and lr_max > lr_min:
+                lr_norm = (lr - lr_min) / (lr_max - lr_min)  # 0..1
+                lr_scaled = lr_norm * y_top  # 0..y_top
+                ax_loss.plot(x_all, lr_scaled, linewidth=1.2, alpha=0.35, linestyle="--", label="lr (scaled)")
+            else:
+                ax_loss.plot(
+                    [x_all.min(), x_all.max()],
+                    [0.05 * y_top, 0.05 * y_top],
+                    linewidth=1.2,
+                    alpha=0.35,
+                    linestyle="--",
+                    label="lr (const)",
+                )
+
         ax_loss.axvline(cur_iter, linewidth=1.0)
 
         row = loss_df[loss_df["iter"] == cur_iter]
@@ -350,6 +400,8 @@ def render_frame(
                 v = float(row.iloc[0][c])
                 ax_loss.scatter([cur_iter], [v], s=18)
                 vals.append(f"{c}={v:.4g}")
+            if "lr" in row.columns:
+                vals.append(f"lr={float(row.iloc[0]['lr']):.4g}")
 
             ax_loss.text(
                 0.99,
@@ -364,6 +416,7 @@ def render_frame(
             )
 
         ax_loss.set_xlim(x_all.min(), x_all.max())
+        ax_loss.set_ylim(0, y_top if y_top > 0 else 1.0)
         if loss_yscale:
             ax_loss.set_yscale(loss_yscale)
         ax_loss.set_ylim(bottom=0)
@@ -404,7 +457,6 @@ def _render_one_frame(args):
         zone_id_to_name=zone_id_to_name,
         zone_colors=zone_colors,
         out_path=out_png,
-        title=f"iter {int(it)}",
         dpi=dpi,
         xlim=xlim,
         ylim=ylim,
@@ -435,7 +487,6 @@ def make_gif(cfg: Config):
 
     iter_to_row = {int(it): i for i, it in enumerate(iters)}
 
-    # глобальные границы по всем точкам за все итерации
     all_x = xy[:, :, 0]
     all_y = xy[:, :, 1]
 
@@ -447,8 +498,8 @@ def make_gif(cfg: Config):
     padx = (maxx - minx) * 0.05 if maxx > minx else 1.0
     pady = (maxy - miny) * 0.05 if maxy > miny else 1.0
 
-    global_xlim = (minx - padx, maxx + padx)
-    global_ylim = (miny - pady, maxy + pady)
+    global_xlim = (minx + padx, maxx - padx)
+    global_ylim = (miny + pady, maxy - pady)
 
     tasks = []
     for k, it in enumerate(iter_list):
@@ -475,11 +526,7 @@ def make_gif(cfg: Config):
             )
         )
 
-    frame_paths = process_map(
-        _render_one_frame,
-        tasks,
-        max_workers=os.cpu_count(),
-    )
+    frame_paths = process_map(_render_one_frame, tasks, max_workers=os.cpu_count(), chunksize=1)
 
     images = [imageio.imread(p) for p in frame_paths]
     duration = 1.0 / max(1, cfg.fps)
