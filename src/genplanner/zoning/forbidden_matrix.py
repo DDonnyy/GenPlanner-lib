@@ -1,4 +1,4 @@
-from genplanner.zoning.terr_zones import TerritoryZoneKind
+from genplanner.zoning.territory_zones import TerritoryZoneKind
 
 FORBIDDEN_NEIGHBORHOOD: set[tuple[TerritoryZoneKind, TerritoryZoneKind]] = {
     # Residential

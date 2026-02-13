@@ -1,48 +1,56 @@
 from ._basic_terr_zones import *
-from .terr_zones import TerritoryZone
+from .abc_zone import BaseZone
+from .territory_zones import TerritoryZone
 
 
-class FuncZone:
-    zones_ratio: dict[TerritoryZone, float]
-    name: str
-    min_zone_area: float
-    zones_keys: dict[str, TerritoryZone]
+class FunctionalZone(BaseZone):
 
-    def __init__(self, zones_ratio, name):
-        self.zones_ratio = self._recalculate_ratio(zones_ratio)
-        self.zones_keys = {t.name: t for t in self.zones_ratio.keys()}
-        self.name = name
-        self._calc_min_area()
+    def __init__(self, zones_ratio: dict[TerritoryZone, float], name: str):
+
+        if not zones_ratio:
+            raise ValueError("zones_ratio cannot be empty")
+
+        self._zones_ratio = self._normalize_ratio(zones_ratio)
+        self._zones_keys = {z.name: z for z in self._zones_ratio}
+        self._name = name
+
+        self._min_area = self._calc_min_area()
+
+        self.validate()
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def min_area(self) -> float:
+        return self._min_area
+
+    def validate(self) -> None:
+
+        total = sum(self._zones_ratio.values())
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError("Zones ratio must sum to 1")
+
+        for zone in self._zones_ratio:
+            if not isinstance(zone, TerritoryZone):
+                raise TypeError("All keys must be TerritoryZone")
+
+    def _normalize_ratio(self, zones_ratio):
+        total = sum(zones_ratio.values())
+        if total <= 0:
+            raise ValueError("Total ratio must be > 0")
+        return {z: v / total for z, v in zones_ratio.items()}
+
+    def _calc_min_area(self):
+        return sum(z.min_area * r for z, r in self._zones_ratio.items())
 
     def __str__(self):
         return f'Functional zone "{self.name}"'
 
-    def __repr__(self):
-        return self.__str__()
-
-    def __hash__(self):
-        return hash((self.name, self.min_zone_area))
-
-    def __eq__(self, other):
-        if isinstance(other, self.__class__):
-            return self.__hash__() == other.__hash__()
-        else:
-            return NotImplemented
-
-    @staticmethod
-    def _recalculate_ratio(zones_ratio):
-        # remove 25% for roads
-        if transport_terr in zones_ratio.keys():
-            zones_ratio[transport_terr] = zones_ratio[transport_terr] * 0.75
-
-        r_sum = sum(zones_ratio.values())
-        return {zone: ratio / r_sum for zone, ratio in zones_ratio.items()}
-
-    def _calc_min_area(self):
-        self.min_zone_area = max([zone.min_block_area / ratio for zone, ratio in self.zones_ratio.items()])
 
 
-basic_func_zone = FuncZone(
+basic_func_zone = FunctionalZone(
     {
         residential_terr: 0.25,
         industrial_terr: 0.12,
@@ -55,7 +63,7 @@ basic_func_zone = FuncZone(
     "basic",
 )
 
-residential_func_zone = FuncZone(
+residential_func_zone = FunctionalZone(
     {
         residential_terr: 0.5,
         business_terr: 0.1,
@@ -67,7 +75,7 @@ residential_func_zone = FuncZone(
     "residential territory",
 )
 
-industrial_func_zone = FuncZone(
+industrial_func_zone = FunctionalZone(
     {
         industrial_terr: 0.5,
         business_terr: 0.1,
@@ -78,7 +86,7 @@ industrial_func_zone = FuncZone(
     },
     "industrial territory",
 )
-business_func_zone = FuncZone(
+business_func_zone = FunctionalZone(
     {
         residential_terr: 0.1,
         business_terr: 0.5,
@@ -89,7 +97,7 @@ business_func_zone = FuncZone(
     },
     "business territory",
 )
-recreation_func_zone = FuncZone(
+recreation_func_zone = FunctionalZone(
     {
         residential_terr: 0.2,
         business_terr: 0.1,
@@ -99,7 +107,7 @@ recreation_func_zone = FuncZone(
     },
     "recreation territory",
 )
-transport_func_zone = FuncZone(
+transport_func_zone = FunctionalZone(
     {
         industrial_terr: 0.1,
         business_terr: 0.05,
@@ -110,7 +118,7 @@ transport_func_zone = FuncZone(
     },
     "transport territory",
 )
-agricalture_func_zone = FuncZone(
+agricalture_func_zone = FunctionalZone(
     {
         residential_terr: 0.1,
         industrial_terr: 0.1,
@@ -122,7 +130,7 @@ agricalture_func_zone = FuncZone(
     },
     "agriculture territory",
 )
-special_func_zone = FuncZone(
+special_func_zone = FunctionalZone(
     {
         residential_terr: 0.01,
         industrial_terr: 0.1,

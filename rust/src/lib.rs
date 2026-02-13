@@ -36,7 +36,7 @@ fn optimize_territory_zoning(
     zone_forbidden: Vec<(usize, usize)>,
     write_logs: bool,
     run_name: String,
-) -> PyResult<(Vec<usize>, Vec<usize>, Vec<f32>, Vec<usize>)> {
+) -> PyResult<Vec<f32>> {
     let result = panic::catch_unwind(|| {
         optimize_zoning(
             boundary_xy,
@@ -159,7 +159,7 @@ fn open_csv_with_header(path: &str, header: &str) -> anyhow::Result<BufWriter<st
 
 pub fn optimize_zoning(
     boundary_xy: Vec<f32>,         // Границы полигона
-    generator_points_xy: Vec<f32>, // фиксация точек
+    generator_points_xy: Vec<f32>, // Движимые и зафиксированные точки
     point2zone: Vec<usize>,        // Принадлежность точки к зоне
     point_fixed_mask: Vec<f32>,
     zone_target_area: Vec<f32>,
@@ -167,12 +167,7 @@ pub fn optimize_zoning(
     zone_forbidden: Vec<(usize, usize)>,
     write_logs: bool,
     run_name: String,
-) -> anyhow::Result<(Vec<usize>, Vec<usize>, Vec<f32>, Vec<usize>)> {
-    let mut final_voronoi_vertices_xy = Vec::new();
-    let mut final_point2cell_idx = Vec::new();
-    let mut final_idx2vtxv = Vec::new();
-    let mut final_edge2vtxv_wall = Vec::new();
-
+) -> anyhow::Result<Vec<f32>> {
     let fixed_flags = point_fixed_mask.iter().filter(|&&x| x != 0.0).count();
 
     let num_zones = zone_target_area.len();
@@ -265,7 +260,7 @@ pub fn optimize_zoning(
         num_iterations = (num_iterations as f32 * 1.1).round() as usize;
     }
 
-    let max_lr = 0.1;
+    let max_lr = 0.09;
     let min_lr = 0.002;
     let lr_decay_start_iter = num_iterations / 2;
 
@@ -424,13 +419,6 @@ pub fn optimize_zoning(
             + loss_forbidden_walllen)?;
 
         zoning_optimizer.backward_step(&loss)?;
-
-        if iter_idx == num_iterations - 1 {
-            final_point2cell_idx = voronoi_info.point2cell_idx;
-            final_idx2vtxv = voronoi_info.cell_idx2vertex_idx;
-            final_voronoi_vertices_xy = voronoi_vertices_xy.flatten_all()?.to_vec1::<f32>()?;
-            final_edge2vtxv_wall = edge2vtxv_wall.clone();
-        }
     }
 
     if let Some(mut w) = loss_writer {
@@ -440,10 +428,11 @@ pub fn optimize_zoning(
         w.flush()?;
     }
 
-    Ok((
-        final_point2cell_idx,
-        final_idx2vtxv,
-        final_voronoi_vertices_xy,
-        final_edge2vtxv_wall,
-    ))
+    let xy = generator_points_xy.flatten_all()?.to_vec1::<f32>()?;
+    let mut movable_xy = Vec::<f32>::with_capacity(movable_sites.len() * 2);
+    for &i_site in &movable_sites {
+        movable_xy.push(xy[i_site * 2]);
+        movable_xy.push(xy[i_site * 2 + 1]);
+    }
+    Ok(movable_xy)
 }

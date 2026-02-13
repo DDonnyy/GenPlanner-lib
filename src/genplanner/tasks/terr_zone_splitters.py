@@ -8,7 +8,7 @@ from shapely import LineString, Point, Polygon
 from shapely.ops import nearest_points, polygonize, unary_union
 
 from genplanner._config import config
-from genplanner.tasks.base_splitters import _split_polygon
+from genplanner.tasks.base_splitters import split_polygon
 from genplanner.tasks.block_splitters import multi_feature2blocks_initial
 from genplanner.utils import (
     elastic_wrap,
@@ -16,7 +16,7 @@ from genplanner.utils import (
     polygon_angle,
     rotate_coords,
 )
-from genplanner.zoning import FuncZone
+from genplanner.zoning import FunctionalZone
 
 poisson_n_radius = config.poisson_n_radius.copy()
 roads_width_def = config.roads_width_def.copy()
@@ -78,12 +78,12 @@ def multi_feature2terr_zones_initial(task, **kwargs):
         rotate_coords(territory_union.exterior.coords, pivot_point, -angle_rad_to_rotate)
     ).simplify(10)
 
-    proxy_zones, _ = _split_polygon(
-        polygon=territory_union,
-        areas_dict=terr_zones["ratio"].to_dict(),
+    proxy_zones, _ = split_polygon(
+        polygon_to_split=territory_union,
+        zone_ratios=terr_zones["ratio"].to_dict(),
         point_radius=poisson_n_radius.get(len(terr_zones), 0.1),
         local_crs=local_crs,
-        fixed_zone_points=fixed_zones_in_poly,
+        zone_fixed_point=fixed_zones_in_poly,
         allow_multipolygon=True,
         dev=kwargs.get("dev_mode", False),
     )
@@ -202,7 +202,7 @@ def multi_feature2terr_zones_initial(task, **kwargs):
             }
 
             task_gdf = gpd.GeoDataFrame(geometry=[zone_polygon], crs=local_crs)
-            task_func_zone = FuncZone(zones_ratio_dict, name=func_zone.name)
+            task_func_zone = FunctionalZone(zones_ratio_dict, name=func_zone.name)
             task_fixed_terr_zones = proxy_fix_points[
                 proxy_fix_points["zone_name"].isin(list(zones_ratio_dict.keys()))
             ].copy()
@@ -282,12 +282,12 @@ def feature2terr_zones_initial(task, **kwargs):
 
     polygon = Polygon(rotate_coords(polygon.exterior.coords, pivot_point, -angle_rad_to_rotate))
 
-    zones, roads = _split_polygon(
-        polygon=polygon,
-        areas_dict=terr_zones["ratio"].to_dict(),
+    zones, roads = split_polygon(
+        polygon_to_split=polygon,
+        zone_ratios=terr_zones["ratio"].to_dict(),
         point_radius=poisson_n_radius.get(len(terr_zones), 0.1),
         local_crs=local_crs,
-        fixed_zone_points=fixed_zones_in_poly,
+        zone_fixed_point=fixed_zones_in_poly,
         dev=kwargs.get("dev_mode", False),
     )
 

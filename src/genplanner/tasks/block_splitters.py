@@ -3,7 +3,7 @@ import numpy as np
 from shapely import LineString, Polygon
 
 from genplanner._config import config
-from genplanner.tasks.base_splitters import _split_polygon
+from genplanner.tasks.base_splitters import split_polygon
 from genplanner.utils import (
     polygon_angle,
     rotate_coords,
@@ -92,9 +92,9 @@ def polygon2blocks_splitter(task, **kwargs):
     pivot_point = polygon.centroid
     angle_rad_to_rotate = polygon_angle(polygon)
     polygon = Polygon(rotate_coords(polygon.exterior.coords, pivot_point, -angle_rad_to_rotate))
-    blocks, roads = _split_polygon(
-        polygon=polygon,
-        areas_dict=areas_dict,
+    blocks, roads = split_polygon(
+        polygon_to_split=polygon,
+        zone_ratios=areas_dict,
         point_radius=poisson_n_radius.get(n_areas, 0.1),
         local_crs=kwargs.get("local_crs"),
     )

@@ -1,4 +1,4 @@
-from .func_zones import (
+from .functional_zones import (
     agricalture_func_zone,
     business_func_zone,
     industrial_func_zone,

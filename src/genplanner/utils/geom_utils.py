@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats.qmc import PoissonDisk
 from shapely import GeometryCollection, LineString, MultiLineString, MultiPolygon, Point, Polygon
+from shapely.coords import CoordinateSequence
 from shapely.ops import nearest_points, polygonize, unary_union
 
 
@@ -29,7 +30,7 @@ def elastic_wrap(gdf: gpd.GeoDataFrame) -> Polygon:
     return poly
 
 
-def rotate_coords(coords: list, pivot: Point, angle_rad: float) -> list[tuple[float, float]]:
+def rotate_coords(coords: CoordinateSequence, pivot: Point, angle_rad: float) -> list[tuple[float, float]]:
     px, py = pivot.x, pivot.y
     rotated_coords = []
     for x, y in coords:
@@ -61,7 +62,7 @@ def polygon_angle(rect: Polygon) -> float:
     return angle_rad
 
 
-def normalize_coords(coords: list[tuple[float, float]], bounds: tuple):
+def normalize_coords(coords: CoordinateSequence, bounds: tuple):
     minx, miny, maxx, maxy = bounds
     width = maxx - minx
     height = maxy - miny

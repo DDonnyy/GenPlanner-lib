@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from enum import Enum
 from functools import total_ordering
 
+from genplanner.zoning.abc_zone import BaseZone
+
 
 class TerritoryZoneKind(str, Enum):
     RESIDENTIAL = "residential"
@@ -16,13 +18,16 @@ class TerritoryZoneKind(str, Enum):
 minimum_block_area = 25000  # m^2
 
 
-@total_ordering
 @dataclass(frozen=True, slots=True)
-class TerritoryZone:
+class TerritoryZone(BaseZone):
 
     kind: TerritoryZoneKind
     name: str
     min_block_area: float = minimum_block_area
+
+    @property
+    def min_area(self) -> float:
+        return self.min_block_area
 
     def __post_init__(self):
         if not isinstance(self.kind, TerritoryZoneKind):
@@ -30,32 +35,18 @@ class TerritoryZone:
                 object.__setattr__(self, "kind", TerritoryZoneKind(str(self.kind)))
             except Exception as e:
                 raise ValueError(
-                    f"Invalid TerritoryZone kind: {self.kind!r}. " f"Allowed: {[k.value for k in TerritoryZoneKind]}"
+                    f"Invalid TerritoryZone kind: {self.kind!r}. "
+                    f"Allowed: {[k.value for k in TerritoryZoneKind]}"
                 ) from e
 
-        if not isinstance(self.name, str) or not self.name.strip():
-            raise ValueError("TerritoryZone name must be a non-empty string")
+        if not self.name.strip():
+            raise ValueError("Zone name must be non-empty")
 
         if self.min_block_area <= 0:
             raise ValueError("min_block_area must be > 0")
 
     def __str__(self) -> str:
         return f'Territory zone "{self.name}" ({self.kind.value})'
-
-    def __eq__(self, other):
-        if isinstance(other, self.__class__):
-            return self.__hash__() == other.__hash__()
-        else:
-            return NotImplemented
-
-    def __lt__(self, other):
-        if not isinstance(other, TerritoryZone):
-            return NotImplemented
-        return (self.kind.value, self.name, self.min_block_area) < (
-            other.kind.value,
-            other.name,
-            other.min_block_area,
-        )
 
 
 residential_terr = TerritoryZone(

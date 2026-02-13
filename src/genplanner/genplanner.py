@@ -23,7 +23,7 @@ from .utils import (
     patch_polygon_interior,
     territory_splitter,
 )
-from .zoning import FuncZone, TerritoryZone, basic_func_zone
+from .zoning import FunctionalZone, TerritoryZone, basic_func_zone
 
 roads_width_def = config.roads_width_def.copy()
 
@@ -358,20 +358,20 @@ class GenPlanner:
         return self._run(multi_feature2blocks_initial, self.territory_to_work_with)
 
     def features2terr_zones(
-        self, funczone: FuncZone = basic_func_zone, fixed_terr_zones: gpd.GeoDataFrame = None
+        self, funczone: FunctionalZone = basic_func_zone, fixed_terr_zones: gpd.GeoDataFrame = None
     ) -> (gpd.GeoDataFrame, gpd.GeoDataFrame):
         return self._features2terr_zones(funczone, fixed_terr_zones, split_further=False)
 
     def features2terr_zones2blocks(
-        self, funczone: FuncZone, fixed_terr_zones: gpd.GeoDataFrame = None
+        self, funczone: FunctionalZone, fixed_terr_zones: gpd.GeoDataFrame = None
     ) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
 
         return self._features2terr_zones(funczone, fixed_terr_zones, split_further=True)
 
     def _features2terr_zones(
-        self, funczone: FuncZone = basic_func_zone, fixed_terr_zones: gpd.GeoDataFrame = None, split_further=False
+        self, funczone: FunctionalZone = basic_func_zone, fixed_terr_zones: gpd.GeoDataFrame = None, split_further=False
     ) -> (gpd.GeoDataFrame, gpd.GeoDataFrame):
-        if not isinstance(funczone, FuncZone):
+        if not isinstance(funczone, FunctionalZone):
             raise TypeError("funczone arg must be of type FuncZone")
         updated_tz, updated_zr = self._prepare_fixed_zones_and_balance_ratios(funczone.zones_ratio, fixed_terr_zones)
         funczone.zones_ratio = updated_zr

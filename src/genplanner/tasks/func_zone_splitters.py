@@ -1,5 +1,5 @@
 from genplanner._config import config
-from genplanner.tasks.base_splitters import _split_polygon
+from genplanner.tasks.base_splitters import split_polygon
 from genplanner.tasks.terr_zone_splitters import feature2terr_zones_initial
 
 poisson_n_radius = config.poisson_n_radius.copy()
@@ -10,9 +10,9 @@ def poly2func2terr2block_initial(task, **kwargs):
     territory, genplan, split_further = task
     areas_dict = genplan.func_zone_ratio
     local_crs = kwargs.get("local_crs")
-    zones, roads = _split_polygon(
-        polygon=territory,
-        areas_dict=areas_dict,
+    zones, roads = split_polygon(
+        polygon_to_split=territory,
+        zone_ratios=areas_dict,
         point_radius=poisson_n_radius.get(len(areas_dict), 0.1),
         local_crs=local_crs,
     )
