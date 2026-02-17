@@ -3,6 +3,7 @@ import math
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+from numpy import ndarray
 from scipy.stats.qmc import PoissonDisk
 from shapely import GeometryCollection, LineString, MultiLineString, MultiPolygon, Point, Polygon
 from shapely.coords import CoordinateSequence
@@ -30,7 +31,7 @@ def elastic_wrap(gdf: gpd.GeoDataFrame) -> Polygon:
     return poly
 
 
-def rotate_coords(coords: CoordinateSequence, pivot: Point, angle_rad: float) -> list[tuple[float, float]]:
+def rotate_coords(coords: CoordinateSequence | ndarray, pivot: Point, angle_rad: float) -> list[tuple[float, float]]:
     px, py = pivot.x, pivot.y
     rotated_coords = []
     for x, y in coords:
@@ -62,7 +63,7 @@ def polygon_angle(rect: Polygon) -> float:
     return angle_rad
 
 
-def normalize_coords(coords: CoordinateSequence, bounds: tuple):
+def normalize_coords(coords: CoordinateSequence | ndarray, bounds: tuple):
     minx, miny, maxx, maxy = bounds
     width = maxx - minx
     height = maxy - miny
@@ -72,7 +73,7 @@ def normalize_coords(coords: CoordinateSequence, bounds: tuple):
     return normalized_coords
 
 
-def denormalize_coords(normalized_coords: list[tuple[float, float]], bounds: tuple):
+def denormalize_coords(normalized_coords: CoordinateSequence | ndarray, bounds: tuple):
     minx, miny, maxx, maxy = bounds
     width = maxx - minx
     height = maxy - miny

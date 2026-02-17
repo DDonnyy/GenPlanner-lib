@@ -8,8 +8,8 @@ from shapely import LineString, Point, Polygon
 from shapely.ops import nearest_points, polygonize, unary_union
 
 from genplanner._config import config
-from genplanner.tasks.base_splitters import split_polygon
-from genplanner.tasks.block_splitters import multi_feature2blocks_initial
+from genplanner.tasks.feat2blocks import multi_feature2blocks_initial
+from genplanner.tasks.polygon_splitter import split_polygon
 from genplanner.utils import (
     elastic_wrap,
     geometry_to_multilinestring,
@@ -18,7 +18,6 @@ from genplanner.utils import (
 )
 from genplanner.zoning import FunctionalZone
 
-poisson_n_radius = config.poisson_n_radius.copy()
 roads_width_def = config.roads_width_def.copy()
 
 

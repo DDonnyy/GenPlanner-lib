@@ -1,5 +1,5 @@
+import json
 import os
-from dataclasses import dataclass
 from pathlib import Path
 
 import imageio.v2 as imageio
@@ -14,15 +14,9 @@ from tqdm.contrib.concurrent import process_map
 
 matplotlib.use("Agg")
 
-RUN_NAME = "test_run"
+LOG_PATH = Path("../dev/test.jsonl")
 
-CSV_PATH = Path(f"../rust/{RUN_NAME}_sites.csv")
-OUT_GIF = "./run.gif"
-
-LOSS_CSV_PATH = Path(f"../rust/{RUN_NAME}.csv")
-LOSS_COLUMNS = None
 LOSS_YSCALE = "linear"  # "linear" / "log" / "symlog"
-
 FPS = 60
 DPI = 80
 
@@ -49,125 +43,65 @@ ZONE_COLORS = {
 }
 
 
-BOUNDARY_XY_FLAT = [
-    0.0,
-    0.44495219,
-    0.01798835,
-    0.37901258,
-    0.03597671,
-    0.31307297,
-    0.08087802,
-    0.25117152,
-    0.12577933,
-    0.18927008,
-    0.19284429,
-    0.20922147,
-    0.25990925,
-    0.22917287,
-    0.31960231,
-    0.17954815,
-    0.41536495,
-    0.20478421,
-    0.51112759,
-    0.23002027,
-    0.60689024,
-    0.25525632,
-    0.70265288,
-    0.28049238,
-    0.79841552,
-    0.30572844,
-    0.89417817,
-    0.3309645,
-    0.98994081,
-    0.35620056,
-    0.98671038,
-    0.43223306,
-    0.98347995,
-    0.50826557,
-    0.98024952,
-    0.58429807,
-    1.0,
-    0.63255385,
-    0.99405254,
-    0.72650285,
-    0.98810508,
-    0.82045185,
-    0.88937156,
-    0.81518912,
-    0.79063805,
-    0.80992639,
-    0.69190454,
-    0.80466366,
-    0.59317103,
-    0.79940093,
-    0.49443751,
-    0.79413819,
-    0.40997919,
-    0.79940093,
-    0.32552087,
-    0.80466366,
-    0.24106254,
-    0.80992639,
-    0.15660422,
-    0.81518912,
-    0.0721459,
-    0.82045185,
-    0.0459602,
-    0.72930028,
-    0.0197745,
-    0.63814871,
-    0.00988725,
-    0.54155045,
-    0.0,
-    0.44495219,
-]
+def load_jsonl_log(path: Path) -> tuple[dict, pd.DataFrame]:
+    """
+    Returns:
+      meta: dict from the first 'type=meta' record (or first record if it's meta)
+      it_df: DataFrame with columns: iter(int), lr(float), loss_each_area..., and sites(list[dict])
+    """
+    meta = None
+    rows = []
 
+    with open(path, "r", encoding="utf-8") as f:
+        for line_no, line in enumerate(f, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
 
-@dataclass
-class Config:
-    boundary: list[float]
-    csv_path: Path
-    out_gif: str
-    fps: int
-    dpi: int
-    zone_id_to_name: dict[int, str]
-    zone_colors: dict[str, str]
+            if obj.get("type") == "meta":
+                meta = obj
+                continue
+
+            # iter record
+            if "iter" in obj:
+                rows.append(obj)
+            else:
+                # ignore unknown record types
+                continue
+
+    if meta is None:
+        raise ValueError(f"No meta record (type=meta) found in {path}")
+
+    if not rows:
+        raise ValueError(f"No iter records found in {path}")
+
+    df = pd.DataFrame(rows)
+
+    # normalize loss dict into columns (loss.each_area -> loss_each_area)
+    if "loss" in df.columns:
+        loss_df = pd.json_normalize(df["loss"]).add_prefix("loss_")
+        df = pd.concat([df.drop(columns=["loss"]), loss_df], axis=1)
+
+    # types
+    df["iter"] = df["iter"].astype(int)
+    if "lr" in df.columns:
+        df["lr"] = df["lr"].astype(float)
+
+    # sites stays as list-of-dicts
+    return meta, df
 
 
 def polygon_from_flat_xy(flat_xy: list[float]) -> Polygon:
     if len(flat_xy) < 6 or len(flat_xy) % 2 != 0:
-        raise ValueError(f"BOUNDARY_XY_FLAT must be even-length and >= 6 numbers, got {len(flat_xy)}")
-
+        raise ValueError(f"polygon_coords must be even-length and >= 6 numbers, got {len(flat_xy)}")
     coords = [(float(flat_xy[i]), float(flat_xy[i + 1])) for i in range(0, len(flat_xy), 2)]
-
-    # на всякий случай замкнём контур
-    if coords[0] != coords[-1]:
-        coords.append(coords[0])
-
     poly = Polygon(coords)
     if not poly.is_valid:
-        # лёгкая починка самопересечений/микроошибок
         poly = poly.buffer(0)
-
     if poly.is_empty or poly.geom_type != "Polygon":
         raise ValueError(f"Boundary polygon invalid after fix. Type={poly.geom_type}, empty={poly.is_empty}")
-
     return poly
-
-
-def load_sites_csv(csv_path: Path) -> pd.DataFrame:
-    df = pd.read_csv(csv_path)
-    required = {"iter", "site", "zone", "x", "y"}
-    missing = required - set(df.columns)
-    if missing:
-        raise ValueError(f"CSV missing columns: {sorted(missing)}. Got columns: {list(df.columns)}")
-    df = df.copy()
-    df["iter"] = df["iter"].astype(int)
-    df["site"] = df["site"].astype(int)
-    df["zone"] = df["zone"].astype(int)
-    df["x"] = df["x"].astype(float)
-    df["y"] = df["y"].astype(float)
-    return df
 
 
 def load_loss_csv(loss_csv_path: Path) -> pd.DataFrame:
@@ -179,31 +113,62 @@ def load_loss_csv(loss_csv_path: Path) -> pd.DataFrame:
     return df
 
 
-def build_dense_tracks(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    iters = np.sort(df["iter"].unique())
-    sites = np.sort(df["site"].unique())
+def build_dense_tracks_from_jsonl(it_df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Returns:
+      iters: (T,)
+      sites: (N,) sorted site ids
+      xy: (T, N, 2)
+      zone_map: (N,) zone id per site (берём из первого появления)
+    """
+    it_df = it_df.sort_values("iter").reset_index(drop=True)
 
-    pivot_x = (
-        df.pivot_table(index="iter", columns="site", values="x", aggfunc="last").reindex(iters).reindex(columns=sites)
-    )
-    pivot_y = (
-        df.pivot_table(index="iter", columns="site", values="y", aggfunc="last").reindex(iters).reindex(columns=sites)
-    )
+    # collect all site ids
+    all_site_ids = set()
+    for sites_list in it_df["sites"]:
+        for s in sites_list:
+            all_site_ids.add(int(s["i"]))
+    sites = np.array(sorted(all_site_ids), dtype=np.int64)
 
-    pivot_x = pivot_x.ffill(axis=0).bfill(axis=0)
-    pivot_y = pivot_y.ffill(axis=0).bfill(axis=0)
+    iters = it_df["iter"].to_numpy(dtype=np.int64)
+    T = len(iters)
+    N = len(sites)
 
-    if pivot_x.isna().any().any() or pivot_y.isna().any().any():
-        nan_sites = sorted(
-            set(pivot_x.columns[pivot_x.isna().any()].tolist() + pivot_y.columns[pivot_y.isna().any()].tolist())
-        )
-        raise ValueError(
-            "Some sites never appear in the CSV, cannot reconstruct their positions. " f"Missing sites: {nan_sites}"
-        )
+    site2col = {int(s): j for j, s in enumerate(sites)}
 
-    xy = np.stack([pivot_x.to_numpy(), pivot_y.to_numpy()], axis=-1)  # (T, N, 2)
+    xy = np.full((T, N, 2), np.nan, dtype=np.float64)
+    zone_map = np.full((N,), -1, dtype=np.int64)
 
-    zone_map = df.sort_values(["site", "iter"]).groupby("site")["zone"].first().reindex(sites).to_numpy()
+    for t in range(T):
+        for s in it_df.iloc[t]["sites"]:
+            i = int(s["i"])
+            j = site2col[i]
+            xy[t, j, 0] = float(s["x"])
+            xy[t, j, 1] = float(s["y"])
+            if zone_map[j] < 0:
+                zone_map[j] = int(s["z"])
+
+    # fill missing values over time
+    # forward fill then back fill for each site/coord
+    for j in range(N):
+        for d in range(2):
+            col = xy[:, j, d]
+            # forward
+            for t in range(1, T):
+                if np.isnan(col[t]) and np.isfinite(col[t - 1]):
+                    col[t] = col[t - 1]
+            # backward
+            for t in range(T - 2, -1, -1):
+                if np.isnan(col[t]) and np.isfinite(col[t + 1]):
+                    col[t] = col[t + 1]
+            xy[:, j, d] = col
+
+    if np.isnan(xy).any():
+        bad = np.where(np.isnan(xy))
+        raise ValueError(f"Still have NaNs in tracks; first bad index: {tuple(bad[i][0] for i in range(3))}")
+
+    if (zone_map < 0).any():
+        raise ValueError("Some sites never had zone id in logs (zone_map contains -1)")
 
     return iters, sites, xy, zone_map
 
@@ -289,6 +254,7 @@ def render_frame(
     loss_cols: list[str] | None = None,
     loss_yscale: str = "symlog",
     cur_iter: int | None = None,
+    title_text: str | None = None,
 ):
     points = [Point(float(x), float(y)) for x, y in points_xy]
     polys = compute_voronoi_cells(points, boundary)
@@ -427,6 +393,18 @@ def render_frame(
     else:
         ax_loss.axis("off")
 
+    if title_text:
+        ax.text(
+            0.01,
+            0.99,
+            title_text,
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=9,
+            bbox=dict(boxstyle="round,pad=0.25", facecolor="white", alpha=0.85),
+            zorder=10,
+        )
     fig.tight_layout()
     fig.savefig(out_path)
     plt.close(fig)
@@ -448,6 +426,7 @@ def _render_one_frame(args):
         loss_df,
         loss_cols,
         loss_yscale,
+        title_text,
     ) = args
 
     render_frame(
@@ -464,42 +443,41 @@ def _render_one_frame(args):
         loss_cols=loss_cols,
         loss_yscale=loss_yscale,
         cur_iter=int(it),
+        title_text=title_text,
     )
     return out_png
 
 
-def make_gif(cfg: Config):
-    boundary = polygon_from_flat_xy(cfg.boundary)
+def make_gif(log_path: Path, fps: int = 60, dpi: int = 80, loss_yscale: str = "linear"):
+    log_path = Path(log_path)
+    run_name = log_path.stem
+    out_gif = str(log_path.with_suffix(".gif"))
 
-    df = load_sites_csv(cfg.csv_path)
-    iters, sites, xy, zone_map = build_dense_tracks(df)
+    meta, it_df = load_jsonl_log(log_path)
 
-    loss_df = load_loss_csv(LOSS_CSV_PATH)
-    loss_cols = LOSS_COLUMNS
-    if loss_cols is None:
-        loss_cols = [c for c in loss_df.columns if c.startswith("loss_")]
+    if "polygon_coords" not in meta:
+        raise ValueError("meta must contain polygon_coords")
 
-    os.makedirs(os.path.dirname(cfg.out_gif) or ".", exist_ok=True)
-    tmp_dir = os.path.join(os.path.dirname(cfg.out_gif) or ".", "_frames_tmp")
+    boundary = polygon_from_flat_xy(meta["polygon_coords"])
+
+    iters, sites, xy, zone_map = build_dense_tracks_from_jsonl(it_df)
+
+    loss_cols = [c for c in it_df.columns if c.startswith("loss_")]
+
+    minx, miny, maxx, maxy = boundary.bounds
+    padx = (maxx - minx) * 0.05 if maxx > minx else 1.0
+    pady = (maxy - miny) * 0.05 if maxy > miny else 1.0
+    global_xlim = (minx - padx, maxx + padx)
+    global_ylim = (miny - pady, maxy + pady)
+
+    title_text = f"{run_name}\nnormalize_rotation={meta.get('normalize_rotation')}, seed={meta.get('seed')}"
+
+    os.makedirs(os.path.dirname(out_gif) or ".", exist_ok=True)
+    tmp_dir = os.path.join(os.path.dirname(out_gif) or ".", f"_frames_{run_name}")
     os.makedirs(tmp_dir, exist_ok=True)
 
     iter_list = list(iters)
-
     iter_to_row = {int(it): i for i, it in enumerate(iters)}
-
-    all_x = xy[:, :, 0]
-    all_y = xy[:, :, 1]
-
-    minx = float(all_x.min())
-    maxx = float(all_x.max())
-    miny = float(all_y.min())
-    maxy = float(all_y.max())
-
-    padx = (maxx - minx) * 0.05 if maxx > minx else 1.0
-    pady = (maxy - miny) * 0.05 if maxy > miny else 1.0
-
-    global_xlim = (minx + padx, maxx - padx)
-    global_ylim = (miny + pady, maxy - pady)
 
     tasks = []
     for k, it in enumerate(iter_list):
@@ -515,33 +493,26 @@ def make_gif(cfg: Config):
                 out_png,
                 boundary,
                 zone_map,
-                cfg.zone_id_to_name,
-                cfg.zone_colors,
-                cfg.dpi,
+                ZONE_ID_TO_NAME,
+                ZONE_COLORS,
+                dpi,
                 global_xlim,
                 global_ylim,
-                loss_df,
+                it_df,
                 loss_cols,
-                LOSS_YSCALE,
+                loss_yscale,
+                title_text,
             )
         )
 
     frame_paths = process_map(_render_one_frame, tasks, max_workers=os.cpu_count(), chunksize=1)
 
     images = [imageio.imread(p) for p in frame_paths]
-    duration = 1.0 / max(1, cfg.fps)
-    imageio.mimsave(cfg.out_gif, images, duration=duration)
+    duration = 1.0 / max(1, fps)
+    imageio.mimsave(out_gif, images, duration=duration)
+
+    print(f"Saved GIF: {out_gif}")
 
 
 if __name__ == "__main__":
-    cfg = Config(
-        boundary=BOUNDARY_XY_FLAT,
-        csv_path=CSV_PATH,
-        out_gif=OUT_GIF,
-        fps=FPS,
-        dpi=DPI,
-        zone_id_to_name=ZONE_ID_TO_NAME,
-        zone_colors=ZONE_COLORS,
-    )
-    make_gif(cfg)
-    print(f"Saved GIF: {OUT_GIF}")
+    make_gif(LOG_PATH, fps=FPS, dpi=DPI, loss_yscale=LOSS_YSCALE)

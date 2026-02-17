@@ -1,22 +1,22 @@
+import json
 import math
 
 import geopandas as gpd
 import numpy as np
 import pandas as pd
-from genplanner._rust import optimize_territory_zoning
 from pyproj import CRS
-from shapely import Point
-from shapely.geometry import LineString, MultiPolygon, Polygon
+from shapely import Point, linestrings, points, voronoi_polygons
+from shapely.geometry import MultiPoint, MultiPolygon, Polygon
 
 from genplanner._config import config
+from genplanner._rust import optimize_territory_zoning
 from genplanner.utils import (
     denormalize_coords,
-    generate_points,
     normalize_coords,
     polygon_angle,
     rotate_coords,
 )
-from genplanner.zoning.abc_zone import BaseZone
+from genplanner.zoning.abc_zone import Zone
 
 roads_width_def = config.roads_width_def.copy()
 
@@ -69,7 +69,7 @@ def _validate_zone_ratios(zone_ratios):
         raise SplitPolygonValidationError("zone_ratios", "must be non-empty")
 
     for k, v in zone_ratios.items():
-        if not isinstance(k, BaseZone):
+        if not isinstance(k, Zone):
             raise SplitPolygonValidationError(
                 "zone_ratios", f"all keys must be BaseZone, got key {k!r} of type {type(k).__name__}"
             )
@@ -90,7 +90,7 @@ def _validate_zone_pairs(field: str, pairs):
     if not pairs:
         return
 
-    seen_undirected: set[frozenset["BaseZone"]] = set()
+    seen_undirected: set[frozenset["Zone"]] = set()
 
     for i, item in enumerate(pairs):
         if not isinstance(item, tuple) or len(item) != 2:
@@ -99,7 +99,7 @@ def _validate_zone_pairs(field: str, pairs):
                 f"item #{i} must be tuple(BaseZone, BaseZone), got {item!r}",
             )
         a, b = item
-        if not isinstance(a, BaseZone) or not isinstance(b, BaseZone):
+        if not isinstance(a, Zone) or not isinstance(b, Zone):
             raise SplitPolygonValidationError(
                 field,
                 f"item #{i} must contain BaseZone objects, got " f"({type(a).__name__}, {type(b).__name__})",
@@ -130,7 +130,7 @@ def _validate_zone_fixed_point(zone_fixed_point):
         return {}
 
     for k, v in zone_fixed_point.items():
-        if not isinstance(k, BaseZone):
+        if not isinstance(k, Zone):
             raise SplitPolygonValidationError(
                 "zone_fixed_point",
                 f"key must be BaseZone, got {type(k).__name__}",
@@ -168,10 +168,10 @@ def _validate_run_name(run_name):
 
 def _validate_split_polygon_args(
     polygon_to_split: Polygon,
-    zone_ratios: dict[BaseZone, float],
-    zone_neighbors: list[tuple[BaseZone, BaseZone]],
-    zone_forbidden: list[tuple[BaseZone, BaseZone]],
-    zone_fixed_point: dict[BaseZone, Point],
+    zone_ratios: dict[Zone, float],
+    zone_neighbors: list[tuple[Zone, Zone]],
+    zone_forbidden: list[tuple[Zone, Zone]],
+    zone_fixed_point: dict[Zone, Point],
     local_crs: CRS,
     run_name: str,
     normalize_rotation: bool = True,
@@ -211,32 +211,11 @@ def _validate_split_polygon_args(
             )
 
 
-def _create_polygons(site2idx, point2zone, idx2vtxv, vtxv2xy):
-    poly_coords = []
-    poly_sites = []
-    for i_site in range(len(site2idx) - 1):
-        if point2zone[i_site] == np.iinfo(np.uint32).max:
-            continue
-
-        num_vtx_in_site = site2idx[i_site + 1] - site2idx[i_site]
-        if num_vtx_in_site == 0:
-            continue
-
-        vtx2xy = []
-        for i_vtx in range(num_vtx_in_site):  # collecting poly
-            i_vtxv = idx2vtxv[site2idx[i_site] + i_vtx]  # founding vertex id
-            vtx2xy.append((vtxv2xy[i_vtxv * 2], vtxv2xy[i_vtxv * 2 + 1]))  # adding vertex xy to poly
-        poly_sites.append(point2zone[i_site])
-        poly_coords.append(Polygon(vtx2xy))
-
-    return poly_coords, poly_sites
-
-
-def _allocate_sites_sqrt_ratio(
-    zone_ratios: dict["BaseZone", float],
+def _allocate_sites_ratio(
+    zone_ratios: dict["Zone", float],
     total_sites: int,
     min_per_zone: int = 2,
-) -> dict["BaseZone", int]:
+) -> dict["Zone", int]:
     """
     Allocate total_sites across zones proportional to sqrt(ratio),
     with each zone having at least min_per_zone.
@@ -255,8 +234,8 @@ def _allocate_sites_sqrt_ratio(
         )
 
     ratios = np.array([float(zone_ratios[z]) for z in zones], dtype=np.float64)
-    w = np.sqrt(ratios)
-    w = w / w.sum()
+
+    w = ratios / ratios.sum()
 
     counts = np.full(Z, min_per_zone, dtype=np.int64)
     remaining = total_sites - min_per_zone * Z
@@ -301,15 +280,17 @@ def _sample_points_from_global_pool(
 
 def split_polygon(
     polygon_to_split: Polygon,
-    zone_ratios: dict[BaseZone, float],
-    zone_neighbors: list[tuple[BaseZone, BaseZone]],
-    zone_forbidden: list[tuple[BaseZone, BaseZone]],
-    zone_fixed_point: dict[BaseZone, Point],
+    zone_ratios: dict[Zone, float],
+    zone_neighbors: list[tuple[Zone, Zone]],
+    zone_forbidden: list[tuple[Zone, Zone]],
+    zone_fixed_point: dict[Zone, Point],
     local_crs: CRS,
     run_name: str,
     normalize_rotation: bool = True,
     allow_multipolygon=False,
     write_logs=False,
+    seed=None,
+    sites_multiplier=5,
 ) -> (gpd.GeoDataFrame, gpd.GeoDataFrame):
 
     _validate_split_polygon_args(
@@ -328,24 +309,33 @@ def split_polygon(
     areas_init = pd.DataFrame(list(zone_ratios.items()), columns=["zone", "ratio"])
     fallback_zone_name = areas_init.loc[areas_init["ratio"].idxmax(), "zone"]
 
-    zone_to_idx = {zone_name: idx for idx, zone_name in enumerate(areas_init["zone"])}
+    zones_ordered = list(areas_init["zone"])
+    zone2idx = {z: i for i, z in enumerate(zones_ordered)}
+    idx2zone = {i: z for i, z in enumerate(zones_ordered)}
+
+    zone_neighbors_idx: list[tuple[int, int]] = [(zone2idx[a], zone2idx[b]) for (a, b) in zone_neighbors]
+    zone_forbidden_idx: list[tuple[int, int]] = [(zone2idx[a], zone2idx[b]) for (a, b) in zone_forbidden]
 
     pivot_point = None
-    angle_rad_to_rotate = None
+    angle_rad2rotate = None
+
+    normalized_polygon = polygon_to_split
     if normalize_rotation:
-        pivot_point = polygon_to_split.centroid
-        angle_rad_to_rotate = polygon_angle(polygon_to_split)
-        polygon_to_split = Polygon(rotate_coords(polygon_to_split.exterior.coords, pivot_point, -angle_rad_to_rotate))
+        pivot_point = normalized_polygon.centroid
+        angle_rad2rotate = polygon_angle(normalized_polygon)
+        normalized_polygon = Polygon(rotate_coords(normalized_polygon.exterior.coords, pivot_point, -angle_rad2rotate))
 
-    bounds = polygon_to_split.bounds
+    bounds = normalized_polygon.bounds
 
-    normalized_polygon = Polygon(normalize_coords(polygon_to_split.exterior.coords, bounds))
+    # TODO add simplify
+    normalized_polygon = Polygon(normalize_coords(normalized_polygon.exterior.coords, bounds))
+    normalized_border = [round(v, 8) for xy in normalized_polygon.exterior.normalize().coords[::-1] for v in xy]
 
     fixed_points = []
     for zone, point in zone_fixed_point.items():
-        room_idx = zone_to_idx[zone]
+        room_idx = zone2idx[zone]
         if normalize_rotation:
-            point = Point(rotate_coords(point.coords, pivot_point, -angle_rad_to_rotate))
+            point = Point(rotate_coords(point.coords, pivot_point, -angle_rad2rotate))
         xy = normalize_coords(point.coords, bounds)
         fixed_points.append((xy[0][0], xy[0][1], room_idx))
 
@@ -355,14 +345,21 @@ def split_polygon(
     areas["area"] = areas["ratio"] * full_area
 
     Z = len(zone_ratios)
-    total_sites = 5 * Z
+    total_sites = sites_multiplier * Z
 
-    zone2count = _allocate_sites_sqrt_ratio(zone_ratios=zone_ratios, total_sites=total_sites, min_per_zone=2)
+    zone2count = _allocate_sites_ratio(zone_ratios=zone_ratios, total_sites=total_sites, min_per_zone=2)
     counts_by_idx = np.zeros(Z, dtype=np.int64)
     for z, cnt in zone2count.items():
-        counts_by_idx[zone_to_idx[z]] = cnt
+        counts_by_idx[zone2idx[z]] = cnt
     base_point2zone = np.repeat(np.arange(Z, dtype=np.int64), counts_by_idx)
-    run_seed = hash(run_name) & 0xFFFFFFFF
+
+    if seed is not None:
+        if not isinstance(seed, int):
+            raise ValueError("seed must be int or None")
+        run_seed = seed & 0xFFFFFFFF
+    else:
+        run_seed = np.random.SeedSequence().entropy
+        run_seed = int(run_seed) & 0xFFFFFFFF
 
     attempts = 10
     best_generation = (gpd.GeoDataFrame(), gpd.GeoDataFrame())
@@ -388,89 +385,102 @@ def split_polygon(
                 point_fixed_mask.extend([1.0, 1.0])
                 point2zone_list.append(int(zone_idx))
 
-            normalized_border = [round(v, 8) for xy in normalized_polygon.exterior.normalize().coords[::-1] for v in xy]
+            if write_logs:
+                run_name = f"{run_name}"
+                log_path = f"{run_name}.jsonl"
+                meta = {
+                    "type": "meta",
+                    "seed": int(run_seed),
+                    "crs": str(local_crs),
+                    "normalize_rotation": bool(normalize_rotation),
+                    "allow_multipolygon": bool(allow_multipolygon),
+                    "polygon_coords": normalized_border,
+                }
+                with open(log_path, "w", encoding="utf-8") as f:
+                    f.write(json.dumps(meta, ensure_ascii=False) + "\n")
 
-            vororoi_sites = optimize_territory_zoning(
+            voronoi_coords, roads_coords = optimize_territory_zoning(
                 boundary_xy=normalized_border,
                 generator_points_xy=generator_points_xy,
                 point2zone=point2zone_list,
                 point_fixed_mask=point_fixed_mask,
                 zone_target_area=areas["area"].sort_index().round(8).tolist(),
-                zone_neighbors=zone_neighbors,
-                zone_forbidden=zone_forbidden,
+                zone_neighbors=zone_neighbors_idx,
+                zone_forbidden=zone_forbidden_idx,
                 write_logs=write_logs,
                 run_name=run_name,
             )
 
-            site2idx = res[0]  # number of points [0,5,10,15,20] means there are 4 polygons with indexes 0..5 etc
-            idx2vtxv = res[1]  # node indexes for each voronoi poly
-            vtxv2xy = res[2]  # all points from generation (+bounds)
-            edge2vtxv_wall = res[3]
+            voronoi_coords = np.asarray(voronoi_coords, dtype=np.float64).reshape(-1, 2)
+            voronoi_coords = denormalize_coords(voronoi_coords, bounds)  # shape (n, 2)
 
-            polygons, poly_sites = create_polygons(site2idx, site2room, idx2vtxv, np.array(vtxv2xy).flatten().tolist())
-            devided_zones = gpd.GeoDataFrame(
-                geometry=polygons, data=poly_sites, columns=["zone_id"], crs=local_crs
-            ).dissolve("zone_id", as_index=False)
+            if normalize_rotation:
+                voronoi_coords = rotate_coords(voronoi_coords, pivot_point, +angle_rad2rotate)
 
-            # это ошибка генерации
-            if len(devided_zones) != len(areas):
-                raise ValueError(f"Number of devided_zones does not match {len(areas)}: {len(devided_zones)}")
+            voronoi_points = points(voronoi_coords)
+            voronoi_polys = list(voronoi_polygons(MultiPoint(voronoi_points)).geoms)
 
-            devided_zones = devided_zones.merge(areas.reset_index(), left_on="zone_id", right_on="index")
+            voronoi_points_gdf = gpd.GeoDataFrame({"zone_id": point2zone_list}, geometry=voronoi_points, crs=local_crs)
+            voronoi_polys_gdf = gpd.GeoDataFrame(geometry=voronoi_polys, crs=local_crs)
 
-            multipolygon_count = sum(isinstance(geom, MultiPolygon) for geom in devided_zones.geometry)
+            voronoi_polys_gdf = voronoi_polys_gdf.sjoin(voronoi_points_gdf, how="left", predicate="contains")
+            zones_gdf = voronoi_polys_gdf.dissolve(by="zone_id", as_index=False)
 
-            new_roads = [
-                (vtxv2xy[x[0]], vtxv2xy[x[1]])
-                for x in np.array(edge2vtxv_wall).reshape(int(len(edge2vtxv_wall) / 2), 2)
-            ]
-            new_roads = gpd.GeoDataFrame(geometry=[LineString(x) for x in new_roads], crs=local_crs)
+            zones_gdf = zones_gdf.clip(polygon_to_split, keep_geom_type=True)
+            zones_gdf["zone"] = zones_gdf["zone_id"].map(idx2zone)
 
-            # Если мультиполигон
+            multipolygon_count = sum(isinstance(geom, MultiPolygon) for geom in zones_gdf.geometry)
+
+            # roads
+            roads_arr = np.asarray(roads_coords, dtype=np.float64).reshape(-1, 4)
+            p0 = roads_arr[:, 0:2]
+            p1 = roads_arr[:, 2:4]
+            p0 = denormalize_coords(p0, bounds)
+            p1 = denormalize_coords(p1, bounds)
+            if normalize_rotation:
+                p0 = rotate_coords(p0, pivot_point, +angle_rad2rotate)
+                p1 = rotate_coords(p1, pivot_point, +angle_rad2rotate)
+            line_coords = np.stack([p0, p1], axis=1)
+            road_geoms = linestrings(line_coords)
+            roads_gdf = gpd.GeoDataFrame(geometry=road_geoms, crs=local_crs)
+
             if multipolygon_count > 0:
-
-                # если разрешены мультиполигоны — отдаём как есть
-                devided_out = devided_zones.drop(
-                    columns=["zone_id", "index", "ratio", "area", "ratio_sqrt", "area_sqrt", "site_indeed"]
-                )
                 if allow_multipolygon:
-                    return devided_out.explode(ignore_index=True), new_roads
+                    return zones_gdf[["zone", "geometry"]], roads_gdf
 
-                # иначе: оцениваем и сохраняем лучший
-                actual_areas = devided_zones.geometry.area
-                target_areas = devided_zones["area"]
-                area_error = np.mean(np.abs(actual_areas - target_areas))
+                actual_areas = zones_gdf.set_index("zone_id").geometry.area
+                target_areas = areas.set_index(areas.index)["area"]
+                aligned = actual_areas.reindex(target_areas.index)
+                if aligned.isna().any():
+                    area_error = float("inf")
+                else:
+                    area_error = float(np.mean(np.abs(aligned.values - target_areas.values)))
 
-                if multipolygon_count < best_multipolygon_count or (
+                if (multipolygon_count < best_multipolygon_count) or (
                     multipolygon_count == best_multipolygon_count and area_error < best_error
                 ):
-                    best_generation = (devided_out.copy(), new_roads.copy())
+                    best_generation = (zones_gdf.copy(), roads_gdf.copy())
                     best_multipolygon_count = multipolygon_count
                     best_error = area_error
 
-                raise MultiPolygonSplitError("MultiPolygon returned from optimizer. Recalculating.")
+                raise MultiPolygonSplitError(
+                    f"MultiPolygon returned (count={multipolygon_count}, area_error={area_error:.6f}). Recalculating."
+                )
 
-            devided_zones = devided_zones.drop(
-                columns=["zone_id", "index", "ratio", "area", "ratio_sqrt", "area_sqrt", "site_indeed"]
-            )
-            return devided_zones, new_roads
+            return zones_gdf[["zone", "geometry"]], roads_gdf
 
         except MultiPolygonSplitError as e:
-            if write_logs:
-                print(e)
             continue
 
         except Exception as e:
-            if write_logs:
-                print(e)
+            print(e)
             continue
 
-    devided_zones, new_roads = best_generation
-    if len(devided_zones) > 0:
-        return devided_zones.explode(ignore_index=True), new_roads
+    best_zones, best_roads = best_generation
+    if len(best_zones) > 0:
+        return best_zones[["zone", "geometry"]], best_roads
 
-    devided_zones = gpd.GeoDataFrame(geometry=[polygon_to_split], crs=local_crs)
-    devided_zones["zone_name"] = fallback_zone_name
-
-    new_roads = gpd.GeoDataFrame(geometry=[], crs=local_crs)
-    return devided_zones, new_roads
+    fallback = gpd.GeoDataFrame(geometry=[polygon_to_split], crs=local_crs)
+    fallback["zone"] = fallback_zone_name
+    empty_roads = gpd.GeoDataFrame()
+    return fallback, empty_roads

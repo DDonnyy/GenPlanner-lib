@@ -11,7 +11,7 @@ use std::panic;
 
 use crate::loss_topo::edge2vtvx_forbidden_wall;
 use candle_core::{DType, Tensor};
-use std::fs::OpenOptions;
+use std::fs::File;
 use std::io::{BufWriter, Write};
 
 #[pyfunction]
@@ -36,7 +36,7 @@ fn optimize_territory_zoning(
     zone_forbidden: Vec<(usize, usize)>,
     write_logs: bool,
     run_name: String,
-) -> PyResult<Vec<f32>> {
+) -> PyResult<(Vec<f32>, Vec<Vec<f32>>)> {
     let result = panic::catch_unwind(|| {
         optimize_zoning(
             boundary_xy,
@@ -144,17 +144,12 @@ pub fn zone2area(
     sum_sites_for_rooms.matmul(&site2areas)
 }
 
-fn open_csv_with_header(path: &str, header: &str) -> anyhow::Result<BufWriter<std::fs::File>> {
-    let file = OpenOptions::new()
-        .write(true)
+fn open_jsonl(path: &str) -> anyhow::Result<BufWriter<File>> {
+    let f = std::fs::OpenOptions::new()
         .create(true)
-        .truncate(true) // <-- ключевая строка
+        .append(true)
         .open(path)?;
-
-    let mut w = BufWriter::new(file);
-    writeln!(&mut w, "{}", header)?;
-    w.flush()?;
-    Ok(w)
+    Ok(BufWriter::new(f))
 }
 
 pub fn optimize_zoning(
@@ -167,7 +162,7 @@ pub fn optimize_zoning(
     zone_forbidden: Vec<(usize, usize)>,
     write_logs: bool,
     run_name: String,
-) -> anyhow::Result<Vec<f32>> {
+) -> anyhow::Result<(Vec<f32>, Vec<Vec<f32>>)> {
     let fixed_flags = point_fixed_mask.iter().filter(|&&x| x != 0.0).count();
 
     let num_zones = zone_target_area.len();
@@ -191,19 +186,11 @@ pub fn optimize_zoning(
         .filter(|&i| point_fixed_mask[i * 2] == 0.0 && point_fixed_mask[i * 2 + 1] == 0.0)
         .collect();
 
-    let mut loss_writer: Option<BufWriter<std::fs::File>> = None;
-    let mut sites_writer: Option<BufWriter<std::fs::File>> = None;
+    let mut log_writer: Option<BufWriter<std::fs::File>> = None;
 
     if write_logs {
-        let loss_path = format!("{}.csv", run_name);
-        let sites_path = format!("{}_sites.csv", run_name);
-
-        loss_writer = Some(open_csv_with_header(
-            &loss_path,
-            "iter,loss_each_area,loss_total_area,loss_walllen,loss_topo,loss_fix,loss_lloyd,loss_group_fix,loss_forbidden,lr",
-        )?);
-
-        sites_writer = Some(open_csv_with_header(&sites_path, "iter,site,zone,x,y")?);
+        let log_path = format!("{}.jsonl", run_name);
+        log_writer = Some(open_jsonl(&log_path)?);
     }
 
     let generator_points_xy = candle_core::Var::from_slice(
@@ -374,39 +361,63 @@ pub fn optimize_zoning(
         let loss_each_area = loss_each_area.affine(50000.0, 0.0)?.clone();
         let loss_total_area = loss_total_area.affine(100000.0, 0.0)?.clone();
         let loss_walllen = loss_walllen.affine(50.0, 0.0)?;
-        let loss_topo = loss_topo.affine(150.0, 0.0)?;
+        let loss_topo = loss_topo.affine(350.0, 0.0)?;
         let loss_fix = loss_fix.affine(10000000., 0.0)?;
         let loss_lloyd = loss_lloyd.affine(120.0, 0.0)?;
         let loss_group_fix = loss_group_fix.affine(80.0, 0.0)?;
         let loss_forbidden_walllen = loss_forbidden_walllen.affine(2000.0, 0.0)?;
 
-        if write_logs {
-            if let Some(w) = loss_writer.as_mut() {
-                writeln!(
-                    w,
-                    "{},{},{},{},{},{},{},{},{},{}",
-                    iter_idx,
-                    loss_each_area.to_vec0::<f32>()?,
-                    loss_total_area.to_vec0::<f32>()?,
-                    loss_walllen.to_vec0::<f32>()?,
-                    loss_topo.to_vec0::<f32>()?,
-                    loss_fix.to_vec0::<f32>()?,
-                    loss_lloyd.to_vec0::<f32>()?,
-                    loss_group_fix.to_vec0::<f32>()?,
-                    loss_forbidden_walllen.to_vec0::<f32>()?,
-                    learning_rate,
-                )?;
-            }
+        if let Some(w) = log_writer.as_mut() {
+            // losses
+            let loss_each_area_v = loss_each_area.to_vec0::<f32>()?;
+            let loss_total_area_v = loss_total_area.to_vec0::<f32>()?;
+            let loss_walllen_v = loss_walllen.to_vec0::<f32>()?;
+            let loss_topo_v = loss_topo.to_vec0::<f32>()?;
+            let loss_fix_v = loss_fix.to_vec0::<f32>()?;
+            let loss_lloyd_v = loss_lloyd.to_vec0::<f32>()?;
+            let loss_group_fix_v = loss_group_fix.to_vec0::<f32>()?;
+            let loss_forbidden_v = loss_forbidden_walllen.to_vec0::<f32>()?;
 
-            if let Some(w) = sites_writer.as_mut() {
-                let xy = generator_points_xy.flatten_all()?.to_vec1::<f32>()?;
-                for &i_site in &movable_sites {
-                    let x = xy[i_site * 2];
-                    let y = xy[i_site * 2 + 1];
-                    let room = point2zone[i_site];
-                    writeln!(w, "{},{},{},{},{}", iter_idx, i_site, room, x, y)?;
+            let xy = generator_points_xy.flatten_all()?.to_vec1::<f32>()?;
+
+            let mut s = String::with_capacity(256 + movable_sites.len() * 64);
+
+            use std::fmt::Write as _;
+
+            s.push('{');
+            write!(&mut s, "\"iter\":{},", iter_idx).unwrap();
+            write!(&mut s, "\"lr\":{},", learning_rate).unwrap();
+
+            s.push_str("\"loss\":{");
+            write!(&mut s, "\"each_area\":{},", loss_each_area_v).unwrap();
+            write!(&mut s, "\"total_area\":{},", loss_total_area_v).unwrap();
+            write!(&mut s, "\"walllen\":{},", loss_walllen_v).unwrap();
+            write!(&mut s, "\"topo\":{},", loss_topo_v).unwrap();
+            write!(&mut s, "\"fix\":{},", loss_fix_v).unwrap();
+            write!(&mut s, "\"lloyd\":{},", loss_lloyd_v).unwrap();
+            write!(&mut s, "\"group_fix\":{},", loss_group_fix_v).unwrap();
+            write!(&mut s, "\"forbidden\":{}", loss_forbidden_v).unwrap();
+            s.push_str("},");
+
+            s.push_str("\"sites\":[");
+            for (k, &i_site) in movable_sites.iter().enumerate() {
+                if k > 0 {
+                    s.push(',');
                 }
+                let x = xy[i_site * 2];
+                let y = xy[i_site * 2 + 1];
+                let z = point2zone[i_site];
+
+                write!(
+                    &mut s,
+                    "{{\"i\":{},\"z\":{},\"x\":{},\"y\":{}}}",
+                    i_site, z, x, y
+                )
+                .unwrap();
             }
+            s.push_str("]}");
+
+            writeln!(w, "{s}")?;
         }
 
         let loss = (loss_each_area
@@ -421,18 +432,33 @@ pub fn optimize_zoning(
         zoning_optimizer.backward_step(&loss)?;
     }
 
-    if let Some(mut w) = loss_writer {
-        w.flush()?;
-    }
-    if let Some(mut w) = sites_writer {
+    if let Some(mut w) = log_writer {
         w.flush()?;
     }
 
-    let xy = generator_points_xy.flatten_all()?.to_vec1::<f32>()?;
-    let mut movable_xy = Vec::<f32>::with_capacity(movable_sites.len() * 2);
-    for &i_site in &movable_sites {
-        movable_xy.push(xy[i_site * 2]);
-        movable_xy.push(xy[i_site * 2 + 1]);
+    let xy_all = generator_points_xy.flatten_all()?.to_vec1::<f32>()?;
+
+    let (voronoi_vertices_xy_fin, voronoi_info_fin) =
+        voronoi2::voronoi(&boundary_xy, &generator_points_xy, |i_site| {
+            point2zone[i_site] != usize::MAX
+        });
+
+    let edge2vtxv_wall_fin = edge2vtvx_wall(&voronoi_info_fin, &point2zone);
+
+    let vtx_xy = voronoi_vertices_xy_fin.flatten_all()?.to_vec1::<f32>()?;
+
+    let mut wall_edges: Vec<Vec<f32>> = Vec::with_capacity(edge2vtxv_wall_fin.len() / 2);
+    for e in (0..edge2vtxv_wall_fin.len()).step_by(2) {
+        let i0 = edge2vtxv_wall_fin[e];
+        let i1 = edge2vtxv_wall_fin[e + 1];
+
+        let x0 = vtx_xy[i0 * 2];
+        let y0 = vtx_xy[i0 * 2 + 1];
+        let x1 = vtx_xy[i1 * 2];
+        let y1 = vtx_xy[i1 * 2 + 1];
+
+        wall_edges.push(vec![x0, y0, x1, y1]);
     }
-    Ok(movable_xy)
+
+    Ok((xy_all, wall_edges))
 }

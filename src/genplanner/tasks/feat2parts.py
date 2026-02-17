@@ -1,6 +1,7 @@
-from shapely import Point, Polygon, LineString
+import pandas as pd
+from shapely import LineString, Point, Polygon
 
-from genplanner.tasks.base_splitters import split_polygon
+from genplanner.tasks.polygon_splitter import split_polygon
 from genplanner.utils import polygon_angle, rotate_coords
 
 

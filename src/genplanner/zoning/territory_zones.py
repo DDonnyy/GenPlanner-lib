@@ -1,8 +1,7 @@
 from dataclasses import dataclass
 from enum import Enum
-from functools import total_ordering
 
-from genplanner.zoning.abc_zone import BaseZone
+from genplanner.zoning.abc_zone import Zone
 
 
 class TerritoryZoneKind(str, Enum):
@@ -19,8 +18,7 @@ minimum_block_area = 25000  # m^2
 
 
 @dataclass(frozen=True, slots=True)
-class TerritoryZone(BaseZone):
-
+class TerritoryZone(Zone):
     kind: TerritoryZoneKind
     name: str
     min_block_area: float = minimum_block_area
@@ -30,19 +28,21 @@ class TerritoryZone(BaseZone):
         return self.min_block_area
 
     def __post_init__(self):
+        self.validate()
+
+    def validate(self) -> None:
         if not isinstance(self.kind, TerritoryZoneKind):
             try:
                 object.__setattr__(self, "kind", TerritoryZoneKind(str(self.kind)))
             except Exception as e:
                 raise ValueError(
-                    f"Invalid TerritoryZone kind: {self.kind!r}. "
-                    f"Allowed: {[k.value for k in TerritoryZoneKind]}"
+                    f"Invalid TerritoryZone kind: {self.kind!r}. " f"Allowed: {[k.value for k in TerritoryZoneKind]}"
                 ) from e
 
-        if not self.name.strip():
-            raise ValueError("Zone name must be non-empty")
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError("Zone name must be non-empty string")
 
-        if self.min_block_area <= 0:
+        if not isinstance(self.min_block_area, (int, float)) or self.min_block_area <= 0:
             raise ValueError("min_block_area must be > 0")
 
     def __str__(self) -> str:

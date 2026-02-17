@@ -18,7 +18,7 @@ class GenPlan:
         return {zone: ratio / r_sum for zone, ratio in func_zone_ratio.items()}
 
     def _calc_min_area(self):
-        self.min_zone_area = max([zone.min_zone_area / ratio for zone, ratio in self.func_zone_ratio.items()])
+        self.min_zone_area = max([zone.min_area / ratio for zone, ratio in self.func_zone_ratio.items()])
 
 
 gen_plan = GenPlan(
