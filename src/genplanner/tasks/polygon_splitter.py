@@ -10,13 +10,15 @@ from shapely.geometry import MultiPoint, MultiPolygon, Polygon
 
 from genplanner._config import config
 from genplanner._rust import optimize_territory_zoning
+
+from genplanner.errors.errors import SplitPolygonValidationError
 from genplanner.utils import (
     denormalize_coords,
     normalize_coords,
     polygon_angle,
     rotate_coords,
 )
-from genplanner.zoning.abc_zone import Zone
+from genplanner.zones.abc_zone import Zone
 
 roads_width_def = config.roads_width_def.copy()
 
@@ -27,23 +29,14 @@ _rng_global = np.random.default_rng(GLOBAL_POINT_POOL_SEED)
 GLOBAL_POINT_POOL_U01 = _rng_global.random((GLOBAL_POINT_POOL_SIZE, 2), dtype=np.float64)
 
 
-class SplitPolygonValidationError(ValueError):
-    """Raised when _split_polygon input arguments fail fast validation."""
-
-    def __init__(self, field: str, message: str):
-        super().__init__(f"{field}: {message}")
-        self.field = field
-        self.message = message
+def _is_finite_number(x) -> bool:
+    return isinstance(x, (int, float)) and math.isfinite(float(x))
 
 
 class MultiPolygonSplitError(Exception):
     """Raised when optimizer returns MultiPolygon and allow_multipolygon is False."""
 
     pass
-
-
-def _is_finite_number(x) -> bool:
-    return isinstance(x, (int, float)) and math.isfinite(float(x))
 
 
 def _validate_polygon_no_holes(polygon_to_split):
@@ -149,11 +142,6 @@ def _validate_zone_fixed_point(zone_fixed_point):
             )
 
 
-def _validate_local_crs(local_crs):
-    if not isinstance(local_crs, CRS):
-        raise SplitPolygonValidationError("local_crs", f"expected pyproj.CRS, got {type(local_crs).__name__}")
-
-
 def _validate_bool(field: str, v):
     if not isinstance(v, bool):
         raise SplitPolygonValidationError(field, f"expected bool, got {type(v).__name__}")
@@ -172,7 +160,6 @@ def _validate_split_polygon_args(
     zone_neighbors: list[tuple[Zone, Zone]],
     zone_forbidden: list[tuple[Zone, Zone]],
     zone_fixed_point: dict[Zone, Point],
-    local_crs: CRS,
     run_name: str,
     normalize_rotation: bool = True,
     allow_multipolygon=False,
@@ -184,7 +171,6 @@ def _validate_split_polygon_args(
     _validate_zone_pairs("zone_neighbors", zone_neighbors)
     _validate_zone_pairs("zone_forbidden", zone_forbidden)
     _validate_zone_fixed_point(zone_fixed_point)
-    _validate_local_crs(local_crs)
     _validate_run_name(run_name)
     _validate_bool("allow_multipolygon", allow_multipolygon)
     _validate_bool("write_logs", write_logs)
@@ -286,6 +272,7 @@ def split_polygon(
     zone_fixed_point: dict[Zone, Point],
     local_crs: CRS,
     run_name: str,
+    geom_simplify_tol: float,
     normalize_rotation: bool = True,
     allow_multipolygon=False,
     write_logs=False,
@@ -299,7 +286,6 @@ def split_polygon(
         zone_neighbors=zone_neighbors,
         zone_forbidden=zone_forbidden,
         zone_fixed_point=zone_fixed_point,
-        local_crs=local_crs,
         run_name=run_name,
         allow_multipolygon=allow_multipolygon,
         write_logs=write_logs,
@@ -327,8 +313,10 @@ def split_polygon(
 
     bounds = normalized_polygon.bounds
 
-    # TODO add simplify
-    normalized_polygon = Polygon(normalize_coords(normalized_polygon.exterior.coords, bounds))
+    normalized_polygon = (
+        Polygon(normalize_coords(normalized_polygon.exterior.coords, bounds)).simplify(geom_simplify_tol).buffer(0)
+    )
+
     normalized_border = [round(v, 8) for xy in normalized_polygon.exterior.normalize().coords[::-1] for v in xy]
 
     fixed_points = []
@@ -384,10 +372,10 @@ def split_polygon(
                 generator_points_xy.extend([round(x, 8), round(y, 8)])
                 point_fixed_mask.extend([1.0, 1.0])
                 point2zone_list.append(int(zone_idx))
+            attempt_run_name = f"{run_name}_attempt_{i}"
 
             if write_logs:
-                run_name = f"{run_name}"
-                log_path = f"{run_name}.jsonl"
+                log_path = f"{attempt_run_name}.jsonl"
                 meta = {
                     "type": "meta",
                     "seed": int(run_seed),
@@ -395,6 +383,7 @@ def split_polygon(
                     "normalize_rotation": bool(normalize_rotation),
                     "allow_multipolygon": bool(allow_multipolygon),
                     "polygon_coords": normalized_border,
+                    "zone_id_to_name": {i: str(z.name) for i, z in idx2zone.items()},
                 }
                 with open(log_path, "w", encoding="utf-8") as f:
                     f.write(json.dumps(meta, ensure_ascii=False) + "\n")
@@ -408,7 +397,7 @@ def split_polygon(
                 zone_neighbors=zone_neighbors_idx,
                 zone_forbidden=zone_forbidden_idx,
                 write_logs=write_logs,
-                run_name=run_name,
+                run_name=attempt_run_name,
             )
 
             voronoi_coords = np.asarray(voronoi_coords, dtype=np.float64).reshape(-1, 2)
@@ -469,11 +458,11 @@ def split_polygon(
 
             return zones_gdf[["zone", "geometry"]], roads_gdf
 
-        except MultiPolygonSplitError as e:
+        except MultiPolygonSplitError:
             continue
 
         except Exception as e:
-            print(e)
+            raise e
             continue
 
     best_zones, best_roads = best_generation

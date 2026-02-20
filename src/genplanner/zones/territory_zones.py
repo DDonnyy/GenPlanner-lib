@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from enum import Enum
 
-from genplanner.zoning.abc_zone import Zone
+from genplanner.zones.abc_zone import Zone
 
 
 class TerritoryZoneKind(str, Enum):

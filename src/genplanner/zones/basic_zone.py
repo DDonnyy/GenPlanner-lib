@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from genplanner.zoning.abc_zone import Zone
+from genplanner.zones.abc_zone import Zone
 
 
 @dataclass(frozen=True, slots=True)

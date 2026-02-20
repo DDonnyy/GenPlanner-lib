@@ -4,7 +4,7 @@ from .geom_utils import (
     normalize_coords,
     denormalize_coords,
     generate_points,
-    geometry_to_multilinestring,
+    geom2multilinestring,
     elastic_wrap,
     rotate_poly,
     territory_splitter,

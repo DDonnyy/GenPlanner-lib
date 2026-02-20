@@ -96,7 +96,7 @@ def generate_points(area_to_fill: Polygon, radius):
     return points_in_polygon
 
 
-def geometry_to_multilinestring(geom):
+def geom2multilinestring(geom):
     def convert_polygon(polygon: Polygon):
         lines = []
         exterior = LineString(polygon.exterior.coords)
@@ -137,8 +137,8 @@ def territory_splitter(
     if isinstance(splitters, list):
         splitters = pd.concat(splitters, ignore_index=True)
     splitters = splitters.to_crs(local_crs)
-    lines_orig = gdf_to_split.geometry.apply(geometry_to_multilinestring).to_list()
-    lines_splitters = splitters.geometry.apply(geometry_to_multilinestring).to_list()
+    lines_orig = gdf_to_split.geometry.apply(geom2multilinestring).to_list()
+    lines_splitters = splitters.geometry.apply(geom2multilinestring).to_list()
     polygons = (
         gpd.GeoDataFrame(geometry=list(polygonize(unary_union(lines_orig + lines_splitters))), crs=local_crs)
         .clip(gdf_to_split.to_crs(local_crs), keep_geom_type=True)
@@ -186,7 +186,7 @@ def patch_polygon_interior(polygon: Polygon, patch_line_width=1) -> Polygon:
                 .exterior
             )
 
-        polygons = list(polygonize(unary_union([geometry_to_multilinestring(polygon)] + lines)))
+        polygons = list(polygonize(unary_union([geom2multilinestring(polygon)] + lines)))
         repr_point = polygon.representative_point()
         for poly in polygons:
             if poly.contains(repr_point):

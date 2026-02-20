@@ -14,22 +14,11 @@ from tqdm.contrib.concurrent import process_map
 
 matplotlib.use("Agg")
 
-LOG_PATH = Path("../dev/test.jsonl")
+LOG_PATH = Path("../dev/proxy_zones_attempt_0.jsonl")
 
 LOSS_YSCALE = "linear"  # "linear" / "log" / "symlog"
 FPS = 60
 DPI = 80
-
-
-ZONE_ID_TO_NAME = {
-    0: "residential",
-    1: "industrial",
-    2: "business",
-    3: "recreation",
-    4: "transport",
-    5: "agriculture",
-    6: "special",
-}
 
 
 ZONE_COLORS = {
@@ -478,6 +467,8 @@ def make_gif(log_path: Path, fps: int = 60, dpi: int = 80, loss_yscale: str = "l
 
     iter_list = list(iters)
     iter_to_row = {int(it): i for i, it in enumerate(iters)}
+    zone_id_to_name = meta.get("zone_id_to_name")
+    zone_id_to_name = {int(k): v for k, v in zone_id_to_name.items()}
 
     tasks = []
     for k, it in enumerate(iter_list):
@@ -493,7 +484,7 @@ def make_gif(log_path: Path, fps: int = 60, dpi: int = 80, loss_yscale: str = "l
                 out_png,
                 boundary,
                 zone_map,
-                ZONE_ID_TO_NAME,
+                zone_id_to_name,
                 ZONE_COLORS,
                 dpi,
                 global_xlim,
