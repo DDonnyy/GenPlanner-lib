@@ -5,15 +5,16 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 from pyproj import CRS
-from shapely import Point, linestrings, points, voronoi_polygons
+from shapely import GeometryCollection, LineString, Point, linestrings, points, voronoi_polygons
 from shapely.geometry import MultiPoint, MultiPolygon, Polygon
+from shapely.ops import nearest_points, polygonize, unary_union
 
 from genplanner._config import config
 from genplanner._rust import optimize_territory_zoning
-
 from genplanner.errors.errors import SplitPolygonValidationError
 from genplanner.utils import (
     denormalize_coords,
+    geom2multilinestring,
     normalize_coords,
     polygon_angle,
     rotate_coords,
@@ -37,20 +38,6 @@ class MultiPolygonSplitError(Exception):
     """Raised when optimizer returns MultiPolygon and allow_multipolygon is False."""
 
     pass
-
-
-def _validate_polygon_no_holes(polygon_to_split):
-    if not isinstance(polygon_to_split, Polygon):
-        raise SplitPolygonValidationError(
-            "polygon_to_split",
-            f"expected shapely.geometry.Polygon, got {type(polygon_to_split).__name__}",
-        )
-    if len(polygon_to_split.interiors) != 0:
-        raise SplitPolygonValidationError("polygon_to_split", "polygon must NOT have holes")
-    if polygon_to_split.is_empty:
-        raise SplitPolygonValidationError("polygon_to_split", "polygon is empty")
-    if not polygon_to_split.is_valid:
-        raise SplitPolygonValidationError("polygon_to_split", "polygon is not valid (self-intersection or similar)")
 
 
 def _validate_zone_ratios(zone_ratios):
@@ -155,7 +142,6 @@ def _validate_run_name(run_name):
 
 
 def _validate_split_polygon_args(
-    polygon_to_split: Polygon,
     zone_ratios: dict[Zone, float],
     zone_neighbors: list[tuple[Zone, Zone]],
     zone_forbidden: list[tuple[Zone, Zone]],
@@ -165,8 +151,6 @@ def _validate_split_polygon_args(
     allow_multipolygon=False,
     write_logs=False,
 ) -> None:
-    _validate_polygon_no_holes(polygon_to_split)
-
     _validate_zone_ratios(zone_ratios)
     _validate_zone_pairs("zone_neighbors", zone_neighbors)
     _validate_zone_pairs("zone_forbidden", zone_forbidden)
@@ -264,6 +248,44 @@ def _sample_points_from_global_pool(
     return pool[idx].copy()
 
 
+def _validate_polygon(polygon_to_split) -> tuple[Polygon, list[LineString]]:
+    if not isinstance(polygon_to_split, Polygon):
+        raise SplitPolygonValidationError(
+            "polygon_to_split",
+            f"expected shapely.geometry.Polygon, got {type(polygon_to_split).__name__}",
+        )
+    if polygon_to_split.is_empty:
+        raise SplitPolygonValidationError("polygon_to_split", "polygon is empty")
+    if not polygon_to_split.is_valid:
+        raise SplitPolygonValidationError("polygon_to_split", "polygon is not valid (self-intersection or similar)")
+
+    new_roads = []
+
+    def patch_polygon_interior(polygon: Polygon, patch_line_width=1) -> Polygon:
+        inner_geoms = [Polygon(ring) for ring in polygon.interiors]
+        while len(inner_geoms) > 0:
+            lines = []
+            for i in range(len(inner_geoms)):
+                all_but_cur = inner_geoms.copy()
+                poly = all_but_cur.pop(i)
+                fix_road = LineString(nearest_points(poly, GeometryCollection(all_but_cur + [polygon.exterior])))
+                new_roads.append(fix_road)
+                lines.append(fix_road.buffer(patch_line_width, resolution=2).exterior)
+            polygons = list(polygonize(unary_union([geom2multilinestring(polygon)] + lines)))
+            repr_point = polygon.representative_point()
+            for poly in polygons:
+                if poly.contains(repr_point):
+                    polygon = poly
+                    break
+            inner_geoms = [Polygon(ring) for ring in polygon.interiors]
+        return polygon
+
+    if len(polygon_to_split.interiors) != 0:
+        polygon_to_split = patch_polygon_interior(polygon_to_split, roads_width_def.get("local road"))
+
+    return polygon_to_split, new_roads
+
+
 def split_polygon(
     polygon_to_split: Polygon,
     zone_ratios: dict[Zone, float],
@@ -281,7 +303,6 @@ def split_polygon(
 ) -> (gpd.GeoDataFrame, gpd.GeoDataFrame):
 
     _validate_split_polygon_args(
-        polygon_to_split=polygon_to_split,
         zone_ratios=zone_ratios,
         zone_neighbors=zone_neighbors,
         zone_forbidden=zone_forbidden,
@@ -291,6 +312,8 @@ def split_polygon(
         write_logs=write_logs,
         normalize_rotation=normalize_rotation,
     )
+
+    polygon_to_split, roads_lines = _validate_polygon(polygon_to_split)
 
     areas_init = pd.DataFrame(list(zone_ratios.items()), columns=["zone", "ratio"])
     fallback_zone_name = areas_init.loc[areas_init["ratio"].idxmax(), "zone"]
@@ -349,7 +372,7 @@ def split_polygon(
         run_seed = np.random.SeedSequence().entropy
         run_seed = int(run_seed) & 0xFFFFFFFF
 
-    attempts = 10
+    attempts = 5
     best_generation = (gpd.GeoDataFrame(), gpd.GeoDataFrame())
     best_multipolygon_count = float("inf")
     best_error = float("inf")
@@ -430,8 +453,8 @@ def split_polygon(
                 p0 = rotate_coords(p0, pivot_point, +angle_rad2rotate)
                 p1 = rotate_coords(p1, pivot_point, +angle_rad2rotate)
             line_coords = np.stack([p0, p1], axis=1)
-            road_geoms = linestrings(line_coords)
-            roads_gdf = gpd.GeoDataFrame(geometry=road_geoms, crs=local_crs)
+            road_geoms = list(linestrings(line_coords))
+            roads_gdf = gpd.GeoDataFrame(geometry=road_geoms + roads_lines, crs=local_crs)
 
             if multipolygon_count > 0:
                 if allow_multipolygon:
@@ -460,10 +483,11 @@ def split_polygon(
 
         except MultiPolygonSplitError:
             continue
-
+        except RuntimeError as e:
+            print(e)
+            continue
         except Exception as e:
             raise e
-            continue
 
     best_zones, best_roads = best_generation
     if len(best_zones) > 0:

@@ -1,13 +1,8 @@
 import geopandas as gpd
 import numpy as np
-from shapely import LineString, Polygon
 
 from genplanner._config import config
-from genplanner.tasks.polygon_splitter import split_polygon
-from genplanner.utils import (
-    polygon_angle,
-    rotate_coords,
-)
+from genplanner.errors import GenPlannerArgumentError
 
 roads_width_def = config.roads_width_def.copy()
 
@@ -15,11 +10,10 @@ roads_width_def = config.roads_width_def.copy()
 def multi_feature2blocks_initial(task, **kwargs):
     (poly_gdf,) = task
 
-    # TODO custom errors
     if not isinstance(poly_gdf, gpd.GeoDataFrame):
-        raise ValueError(f"poly_gdf wrong dtype {type(poly_gdf)}")
+        raise GenPlannerArgumentError(f"poly_gdf wrong dtype {type(poly_gdf)}")
     if "territory_zone" not in poly_gdf.columns:
-        raise KeyError(f"territory_zone not in poly_gdf")
+        raise GenPlannerArgumentError(f"`territory_zone` column not presented in provided gdf")
 
     new_tasks = []
     for ind, row in poly_gdf.iterrows():

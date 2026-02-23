@@ -2,6 +2,7 @@ import concurrent.futures
 import multiprocessing
 import os
 import time
+from datetime import datetime
 from typing import Literal
 
 import geopandas as gpd
@@ -9,12 +10,12 @@ import pandas as pd
 from shapely.geometry import MultiPolygon, Polygon
 
 from genplanner import config
-from genplanner.errors import GenPlannerInitError, GenPlannerArgumentError
+from genplanner.errors import GenPlannerArgumentError, GenPlannerInitError
 from genplanner.main.init_validation import (
-    cut_out_features,
-    cut_by_roads,
-    cut_by_existing_terr_zones,
     add_static_fix_points,
+    cut_by_existing_terr_zones,
+    cut_by_roads,
+    cut_out_features,
     prepare_fixed_points_and_balance_ratios,
     resolve_relation_matrix,
 )
@@ -45,6 +46,7 @@ class GenPlanner:
         parallel=True,
         parallel_max_workers=None,
         rust_write_logs=False,
+        run_name=None,
     ):
         """
         - simplify_geometry_value: do not affect output zones geometry, only used for internal calculations.
@@ -87,16 +89,17 @@ class GenPlanner:
         else:
             if parallel_max_workers is None:
                 self.parallel_max_workers = max(1, cpu_total - 1)
-                logger.debug(
-                    f"Parallel execution enabled | workers={self.parallel_max_workers} (auto)"
-                )
+                logger.debug(f"Parallel execution enabled | workers={self.parallel_max_workers} (auto)")
             else:
                 self.parallel_max_workers = max(1, int(parallel_max_workers))
-                logger.debug(
-                    f"Parallel execution enabled | workers={self.parallel_max_workers} (manual)"
-                )
+                logger.debug(f"Parallel execution enabled | workers={self.parallel_max_workers} (manual)")
         if self.rust_write_logs:
             logger.info("Rust optimizer logs enabled.")
+        if run_name is None:
+            now = datetime.now()
+            self.run_name = now.strftime("gp%d%m%y_%H:%M")
+        else:
+            self.run_name = str(run_name)
 
     def _create_working_gdf(
         self,
@@ -149,6 +152,7 @@ class GenPlanner:
                 "rust_write_logs": self.rust_write_logs,
                 "simplify": self.simplify_geometry_value,
                 "local_crs": self.local_crs.to_epsg(),
+                "run_name": self.run_name,
             }
         )
 
@@ -205,7 +209,7 @@ class GenPlanner:
     def features2terr_zones(
         self,
         funczone: FunctionalZone = basic_func_zone,
-        relation_matrix: RelationMatrixArg = None,
+        relation_matrix: RelationMatrixArg = "default",
         terr_zones_fix_points: gpd.GeoDataFrame = None,
     ) -> (gpd.GeoDataFrame, gpd.GeoDataFrame):
         return self._features2terr_zones(funczone, relation_matrix, terr_zones_fix_points, split_further=False)
@@ -213,7 +217,7 @@ class GenPlanner:
     def features2terr_zones2blocks(
         self,
         funczone: FunctionalZone = basic_func_zone,
-        relation_matrix: RelationMatrixArg = None,
+        relation_matrix: RelationMatrixArg = "default",
         terr_zones_fix_points: gpd.GeoDataFrame = None,
     ) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
 

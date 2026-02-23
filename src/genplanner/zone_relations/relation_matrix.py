@@ -1,6 +1,6 @@
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
-from collections.abc import Iterable, Mapping
 
 import pandas as pd
 
@@ -201,6 +201,38 @@ class ZoneRelationMatrix:
                 seen.add(key)
                 out.append(key)
         return out
+
+    def subset(
+        self,
+        zones: Iterable[Zone],
+        *,
+        strict: bool = False,
+    ) -> "ZoneRelationMatrix":
+        """
+        Return a new matrix restricted to the provided zones (if present in this matrix).
+
+        - If strict=False: silently ignores zones not found in current matrix.
+        - If strict=True: raises KeyError if any provided zone is missing.
+        """
+        current = set(self.zones)
+
+        requested = tuple(zones)
+        if not requested:
+            raise ValueError("subset zones cannot be empty")
+
+        missing = [z for z in requested if z not in current]
+        if missing and strict:
+            raise KeyError(f"Zones not found in matrix: {missing!r}")
+
+        req_set = set(z for z in requested if z in current)
+        new_zones = tuple(z for z in self.zones if z in req_set)
+
+        if not new_zones:
+            raise ValueError("subset resulted in empty zone list")
+
+        new_m: dict[Zone, dict[Zone, Relation]] = {a: {b: self._m[a][b] for b in new_zones} for a in new_zones}
+
+        return ZoneRelationMatrix(zones=new_zones, _m=new_m)
 
     def as_dataframe(self) -> pd.DataFrame:
         """

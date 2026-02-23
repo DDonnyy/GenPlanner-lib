@@ -173,29 +173,6 @@ def territory_splitter(
     return polygons.to_crs(original_crs)
 
 
-def patch_polygon_interior(polygon: Polygon, patch_line_width=1) -> Polygon:
-    inner_geoms = [Polygon(ring) for ring in polygon.interiors]
-    while len(inner_geoms) > 0:
-        lines = []
-        for i in range(len(inner_geoms)):
-            all_but_cur = inner_geoms.copy()
-            poly = all_but_cur.pop(i)
-            lines.append(
-                LineString(nearest_points(poly, GeometryCollection(all_but_cur + [polygon.exterior])))
-                .buffer(patch_line_width / 2, resolution=2)
-                .exterior
-            )
-
-        polygons = list(polygonize(unary_union([geom2multilinestring(polygon)] + lines)))
-        repr_point = polygon.representative_point()
-        for poly in polygons:
-            if poly.contains(repr_point):
-                polygon = poly
-                break
-        inner_geoms = [Polygon(ring) for ring in polygon.interiors]
-    return polygon
-
-
 def extend_linestring(line: LineString, distance: float = 1.0) -> LineString:
     if len(line.coords) < 2:
         raise ValueError("LineString must have at least two points.")

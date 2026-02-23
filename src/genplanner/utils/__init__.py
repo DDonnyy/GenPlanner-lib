@@ -9,6 +9,5 @@ from .geom_utils import (
     rotate_poly,
     territory_splitter,
     explode_linestring,
-    patch_polygon_interior,
     extend_linestring,
 )

@@ -5,6 +5,7 @@ from shapely import LineString, Point, Polygon
 from shapely.ops import nearest_points
 
 from genplanner import config
+from genplanner.errors import GenplannerInfeasibleMultiFeatureError
 from genplanner.tasks.feat2blocks import multi_feature2blocks_initial
 from genplanner.tasks.polygon_splitter import split_polygon
 from genplanner.utils import (
@@ -43,7 +44,7 @@ def multi_feature2terr_zones_initial(task, **kwargs):
     relation_matrix: ZoneRelationMatrix
     fixed_terr_zones: gpd.GeoDataFrame
     split_further: bool
-
+    run_name = f"{kwargs['run_name']}_mf2tz"
     local_crs = kwargs["local_crs"]
     initial_gdf["feature_area"] = initial_gdf.area
 
@@ -55,6 +56,8 @@ def multi_feature2terr_zones_initial(task, **kwargs):
         columns=["ratio", "min_block_area"],
     )
     terr_zones = filter_terr_zone(terr_zones, initial_gdf["feature_area"].sum())
+    terr_zone_list = tuple(terr_zones.index)
+    relation_matrix = relation_matrix.subset(terr_zone_list, strict=False)
 
     if fixed_terr_zones is None:
         fixed_terr_zones = gpd.GeoDataFrame()
@@ -63,6 +66,7 @@ def multi_feature2terr_zones_initial(task, **kwargs):
         fixed_zones_in_poly = fixed_terr_zones[fixed_terr_zones.within(territory_union)].copy()
         if len(fixed_zones_in_poly) > 0:
             fixed_zones_in_poly = fixed_zones_in_poly.set_index("fixed_zone")["geometry"].to_dict()
+            fixed_zones_in_poly = {z: geom for z, geom in fixed_zones_in_poly.items() if z in terr_zone_list}
         else:
             fixed_zones_in_poly = {}
     else:
@@ -75,7 +79,7 @@ def multi_feature2terr_zones_initial(task, **kwargs):
         zone_forbidden=relation_matrix.zone_forbidden(),
         zone_fixed_point=fixed_zones_in_poly,
         local_crs=local_crs,
-        run_name="proxy_zones",
+        run_name=f"proxy{run_name}",
         geom_simplify_tol=kwargs["simplify"],
         allow_multipolygon=True,
         write_logs=kwargs["rust_write_logs"],
@@ -134,7 +138,9 @@ def multi_feature2terr_zones_initial(task, **kwargs):
     model.solve(pulp.PULP_CBC_CMD(msg=True, timeLimit=20, gapRel=0.01))
 
     if model.status == pulp.LpStatusInfeasible:
-        print("Не решается(( LpStatus:", pulp.LpStatus[model.status])
+        if kwargs.get("infeasible", 0) == 5:
+            raise GenplannerInfeasibleMultiFeatureError("Cannot solve task in 5 tries.")
+        kwargs.update({"run_name": f"{run_name}_infeasible", "infeasible": kwargs.get("infeasible", 0) + 1})
         return {"new_tasks": [(multi_feature2terr_zones_initial, task, kwargs)]}
 
     allocations = []
@@ -145,7 +151,7 @@ def multi_feature2terr_zones_initial(task, **kwargs):
     del x, y
     allocations = pd.DataFrame(allocations, columns=["zone_index", "territorial_zone", "assigned_area"])
 
-    kwargs.update({"func_zone": func_zone})
+    kwargs.update({"func_zone": func_zone, "run_name": run_name})
 
     ready_for_blocks: list[gpd.GeoDataFrame] = []
     new_tasks: list[tuple] = []
@@ -191,9 +197,17 @@ def multi_feature2terr_zones_initial(task, **kwargs):
             task_fixed_terr_zones = task_fixed_terr_zones.loc[
                 ~task_fixed_terr_zones["geometry"].duplicated(keep="first")
             ]
+            task_relation_matrix = relation_matrix.subset(needed_zones)
+
+            task_kwargs = kwargs.copy()
+            task_kwargs.update({"run_name": f"{run_name}_{ind}"})
 
             new_tasks.append(
-                (feature2terr_zones_initial, (task_gdf, task_func_zone, split_further, task_fixed_terr_zones), kwargs)
+                (
+                    feature2terr_zones_initial,
+                    (task_gdf, task_func_zone, task_relation_matrix, task_fixed_terr_zones, split_further),
+                    task_kwargs,
+                )
             )
 
     if len(ready_for_blocks) > 0:
@@ -203,27 +217,25 @@ def multi_feature2terr_zones_initial(task, **kwargs):
 
     if split_further:
         if len(block_splitter_gdf) > 0:
-            kwargs.update({"from": "feature2terr_zones_initial"})
             new_tasks.append((multi_feature2blocks_initial, (block_splitter_gdf,), kwargs))
         return {"new_tasks": new_tasks}
-
-        # return {"new_tasks": new_tasks,"generation":proxy_generation}
     else:
         if len(block_splitter_gdf) > 0:
             block_splitter_gdf["func_zone"] = func_zone
-        # block_splitter_gdf["territory_zone"] = block_splitter_gdf["territory_zone"].apply(lambda x: x.name)
         return {"new_tasks": new_tasks, "generation": block_splitter_gdf}
-
-        # return {"new_tasks": new_tasks, "generation": pd.concat([block_splitter_gdf,proxy_generation],ignore_index=True)}
 
 
 def feature2terr_zones_initial(task, **kwargs):
-    gdf, func_zone, split_further, fixed_terr_zones = task
+    initial_gdf, func_zone, relation_matrix, fixed_terr_zones, split_further = task
+    initial_gdf: gpd.GeoDataFrame
+    func_zone: FunctionalZone
+    relation_matrix: ZoneRelationMatrix
+    fixed_terr_zones: gpd.GeoDataFrame
+    split_further: bool
+    run_name = f"{kwargs['run_name']}_f2tz"
+    local_crs = kwargs["local_crs"]
 
-    # TODO split gdf on parts if too big for 1 funczone
-
-    polygon = gdf.iloc[0].geometry
-    local_crs = gdf.crs
+    polygon = initial_gdf.iloc[0].geometry
     area = polygon.area
 
     terr_zones = pd.DataFrame.from_dict(
@@ -233,54 +245,47 @@ def feature2terr_zones_initial(task, **kwargs):
     )
 
     terr_zones = filter_terr_zone(terr_zones, area)
+    terr_zone_list = tuple(terr_zones.index)
+    relation_matrix = relation_matrix.subset(terr_zone_list, strict=False)
 
     if len(terr_zones) == 0:
         profile_terr = max(func_zone.zones_ratio.items(), key=lambda x: x[1])[0]
         data = {"territory_zone": [profile_terr], "func_zone": [func_zone], "geometry": [polygon]}
         return {"generation": gpd.GeoDataFrame(data=data, geometry="geometry", crs=local_crs)}
 
-    pivot_point = polygon.centroid
-    angle_rad_to_rotate = polygon_angle(polygon)
-
     if fixed_terr_zones is None:
         fixed_terr_zones = gpd.GeoDataFrame()
 
     if len(fixed_terr_zones) > 0:
-        # TODO убрать дубликаты точек, раст падает из за них
         fixed_zones_in_poly = fixed_terr_zones[fixed_terr_zones.intersects(polygon)].copy()
         if len(fixed_zones_in_poly) > 0:
-            fixed_zones_in_poly["geometry"] = fixed_zones_in_poly["geometry"].apply(
-                lambda x: Point(rotate_coords(x.coords, pivot_point, -angle_rad_to_rotate))
-            )
-            fixed_zones_in_poly["zone_name"] = fixed_zones_in_poly["fixed_zone"].apply(lambda x: x.name)
-            fixed_zones_in_poly = fixed_zones_in_poly.groupby("zone_name", as_index=False).agg(
-                {"geometry": list, "fixed_zone": "first"}
-            )
+            fixed_zones_in_poly = fixed_zones_in_poly.groupby("fixed_zone", as_index=False).agg({"geometry": "first"})
             fixed_zones_in_poly = fixed_zones_in_poly.set_index("fixed_zone")["geometry"].to_dict()
+            fixed_zones_in_poly = {z: geom for z, geom in fixed_zones_in_poly.items() if z in terr_zone_list}
         else:
             fixed_zones_in_poly = None
     else:
         fixed_zones_in_poly = None
 
-    polygon = Polygon(rotate_coords(polygon.exterior.coords, pivot_point, -angle_rad_to_rotate))
-
-    zones, roads = split_polygon(
-        polygon_to_split=polygon,
-        zone_ratios=terr_zones["ratio"].to_dict(),
-        point_radius=poisson_n_radius.get(len(terr_zones), 0.1),
-        local_crs=local_crs,
-        zone_fixed_point=fixed_zones_in_poly,
-        dev=kwargs.get("dev_mode", False),
-    )
-
-    if not zones.empty:
-        zones.geometry = zones.geometry.apply(
-            lambda x: Polygon(rotate_coords(x.exterior.coords, pivot_point, angle_rad_to_rotate))
+    if len(terr_zones) > 1:
+        zones, roads = split_polygon(
+            polygon_to_split=polygon,
+            zone_ratios=terr_zones["ratio"].to_dict(),
+            zone_neighbors=relation_matrix.zone_neighbors(),
+            zone_forbidden=relation_matrix.zone_forbidden(),
+            zone_fixed_point=fixed_zones_in_poly,
+            local_crs=local_crs,
+            run_name=run_name,
+            geom_simplify_tol=kwargs["simplify"],
+            allow_multipolygon=False,
+            write_logs=kwargs["rust_write_logs"],
+            seed=kwargs.get("seed", None),
+            sites_multiplier=kwargs.get("sites_multiplier", 5),
         )
-    if not roads.empty:
-        roads.geometry = roads.geometry.apply(
-            lambda x: LineString(rotate_coords(x.coords, pivot_point, angle_rad_to_rotate))
-        )
+    else:
+        data = {"zone": [terr_zones.index[0]], "func_zone": [func_zone], "geometry": [polygon]}
+        zones = gpd.GeoDataFrame(data=data, geometry="geometry", crs=local_crs)
+        roads = gpd.GeoDataFrame()
 
     road_lvl = "regulated highway"
     roads["road_lvl"] = road_lvl
@@ -289,7 +294,7 @@ def feature2terr_zones_initial(task, **kwargs):
     if not split_further:
         zones["func_zone"] = func_zone
         if len(zones) > 0:
-            zones["territory_zone"] = zones["zone_name"]
+            zones["territory_zone"] = zones["zone"]
             zones = zones[["func_zone", "territory_zone", "geometry"]]
         return {"generation": zones, "generated_roads": roads}
 
@@ -297,6 +302,6 @@ def feature2terr_zones_initial(task, **kwargs):
     kwargs.update({"func_zone": func_zone})
     kwargs.update({"from": "feature2terr_zones_initial"})
     if len(zones) > 0:
-        zones["territory_zone"] = zones["zone_name"]
+        zones["territory_zone"] = zones["zone"]
     task = [(multi_feature2blocks_initial, (zones,), kwargs)]
     return {"new_tasks": task, "generated_roads": roads}

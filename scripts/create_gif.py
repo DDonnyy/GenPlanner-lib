@@ -14,12 +14,12 @@ from tqdm.contrib.concurrent import process_map
 
 matplotlib.use("Agg")
 
-LOG_PATH = Path("../dev/proxy_zones_attempt_0.jsonl")
+LOG_PATH = Path("../dev/test_mf2tz_101_f2tz_attempt_0.jsonl")
 
 LOSS_YSCALE = "linear"  # "linear" / "log" / "symlog"
 FPS = 60
 DPI = 80
-
+FRAME_STRIDE = 2
 
 ZONE_COLORS = {
     "residential": "#FFD700",
@@ -52,11 +52,9 @@ def load_jsonl_log(path: Path) -> tuple[dict, pd.DataFrame]:
                 meta = obj
                 continue
 
-            # iter record
             if "iter" in obj:
                 rows.append(obj)
             else:
-                # ignore unknown record types
                 continue
 
     if meta is None:
@@ -67,17 +65,14 @@ def load_jsonl_log(path: Path) -> tuple[dict, pd.DataFrame]:
 
     df = pd.DataFrame(rows)
 
-    # normalize loss dict into columns (loss.each_area -> loss_each_area)
     if "loss" in df.columns:
         loss_df = pd.json_normalize(df["loss"]).add_prefix("loss_")
         df = pd.concat([df.drop(columns=["loss"]), loss_df], axis=1)
 
-    # types
     df["iter"] = df["iter"].astype(int)
     if "lr" in df.columns:
         df["lr"] = df["lr"].astype(float)
 
-    # sites stays as list-of-dicts
     return meta, df
 
 
@@ -137,16 +132,12 @@ def build_dense_tracks_from_jsonl(it_df: pd.DataFrame) -> tuple[np.ndarray, np.n
             if zone_map[j] < 0:
                 zone_map[j] = int(s["z"])
 
-    # fill missing values over time
-    # forward fill then back fill for each site/coord
     for j in range(N):
         for d in range(2):
             col = xy[:, j, d]
-            # forward
             for t in range(1, T):
                 if np.isnan(col[t]) and np.isfinite(col[t - 1]):
                     col[t] = col[t - 1]
-            # backward
             for t in range(T - 2, -1, -1):
                 if np.isnan(col[t]) and np.isfinite(col[t + 1]):
                     col[t] = col[t + 1]
@@ -259,7 +250,6 @@ def render_frame(
 
     ax.set_aspect("equal", adjustable="box")
 
-    # 1 полигон на 1 сайт
     for i, pt in enumerate(points):
         poly = mapping[i]
         zone_id = int(zone_per_site[i])
@@ -272,12 +262,10 @@ def render_frame(
             ax.fill(xs, ys, alpha=0.75, linewidth=0.6, color=color, zorder=1)
             ax.plot(xs, ys, linewidth=0.6, color="black", zorder=2)
 
-            # если хочешь белые дырки внутри полигона:
             for hole in p.interiors:
                 hx, hy = hole.xy
                 ax.fill(hx, hy, color="white", linewidth=0, zorder=1)
 
-    # boundary
     bx, by = boundary.exterior.xy
     ax.plot(bx, by, linewidth=2.0, color="black")
 
@@ -304,7 +292,6 @@ def render_frame(
 
     ax.axis("off")
 
-    # ----- LOSS PLOT (bottom panel) -----
     if loss_df is not None and cur_iter is not None:
         if loss_cols is None:
             loss_cols = [c for c in loss_df.columns if c.startswith("loss_")]
@@ -437,7 +424,16 @@ def _render_one_frame(args):
     return out_png
 
 
-def make_gif(log_path: Path, fps: int = 60, dpi: int = 80, loss_yscale: str = "linear"):
+def make_gif(
+    log_path: Path,
+    fps: int = 60,
+    dpi: int = 80,
+    loss_yscale: str = "linear",
+    frame_stride: int = 1,
+):
+    if frame_stride < 1:
+        raise ValueError("frame_stride must be >= 1")
+
     log_path = Path(log_path)
     run_name = log_path.stem
     out_gif = str(log_path.with_suffix(".gif"))
@@ -448,7 +444,6 @@ def make_gif(log_path: Path, fps: int = 60, dpi: int = 80, loss_yscale: str = "l
         raise ValueError("meta must contain polygon_coords")
 
     boundary = polygon_from_flat_xy(meta["polygon_coords"])
-
     iters, sites, xy, zone_map = build_dense_tracks_from_jsonl(it_df)
 
     loss_cols = [c for c in it_df.columns if c.startswith("loss_")]
@@ -466,6 +461,9 @@ def make_gif(log_path: Path, fps: int = 60, dpi: int = 80, loss_yscale: str = "l
     os.makedirs(tmp_dir, exist_ok=True)
 
     iter_list = list(iters)
+
+    iter_list = iter_list[::frame_stride]
+
     iter_to_row = {int(it): i for i, it in enumerate(iters)}
     zone_id_to_name = meta.get("zone_id_to_name")
     zone_id_to_name = {int(k): v for k, v in zone_id_to_name.items()}
@@ -499,11 +497,11 @@ def make_gif(log_path: Path, fps: int = 60, dpi: int = 80, loss_yscale: str = "l
     frame_paths = process_map(_render_one_frame, tasks, max_workers=os.cpu_count(), chunksize=1)
 
     images = [imageio.imread(p) for p in frame_paths]
-    duration = 1.0 / max(1, fps)
+    duration = 1 / max(1, fps)
     imageio.mimsave(out_gif, images, duration=duration)
 
     print(f"Saved GIF: {out_gif}")
 
 
 if __name__ == "__main__":
-    make_gif(LOG_PATH, fps=FPS, dpi=DPI, loss_yscale=LOSS_YSCALE)
+    make_gif(LOG_PATH, fps=FPS, dpi=DPI, loss_yscale=LOSS_YSCALE, frame_stride=FRAME_STRIDE)
