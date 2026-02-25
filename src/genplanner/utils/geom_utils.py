@@ -3,9 +3,11 @@ import math
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+from numpy import ndarray
 from scipy.stats.qmc import PoissonDisk
-from shapely import GeometryCollection, LineString, MultiLineString, MultiPolygon, Point, Polygon
-from shapely.ops import nearest_points, polygonize, unary_union
+from shapely import LineString, MultiLineString, MultiPolygon, Point, Polygon
+from shapely.coords import CoordinateSequence
+from shapely.ops import polygonize, unary_union
 
 
 def rotate_poly(poly: Polygon | MultiPolygon, pivot_point, angle_rad) -> Polygon | MultiPolygon:
@@ -19,17 +21,17 @@ def elastic_wrap(gdf: gpd.GeoDataFrame) -> Polygon:
     multip = gpd.GeoDataFrame(geometry=[gdf.union_all()], crs=gdf.crs).explode(ignore_index=True)
     max_dist = (
         np.ceil(multip.apply(lambda row: multip.drop(row.name).distance(row.geometry).min(), axis=1).max(axis=0)) + 0.1
-    )
+    ) * 1.1
     if pd.isna(max_dist):
         max_dist = 1
-    poly = multip.buffer(max_dist + 1).union_all().buffer(-max_dist)
+    poly = multip.buffer(max_dist + 1, resolution=2).union_all().buffer(-max_dist, resolution=2)
     if isinstance(poly, MultiPolygon):
         return elastic_wrap(gpd.GeoDataFrame(geometry=[poly], crs=gdf.crs))
     poly = Polygon(poly.exterior)
     return poly
 
 
-def rotate_coords(coords: list, pivot: Point, angle_rad: float) -> list[tuple[float, float]]:
+def rotate_coords(coords: CoordinateSequence | ndarray, pivot: Point, angle_rad: float) -> list[tuple[float, float]]:
     px, py = pivot.x, pivot.y
     rotated_coords = []
     for x, y in coords:
@@ -61,7 +63,7 @@ def polygon_angle(rect: Polygon) -> float:
     return angle_rad
 
 
-def normalize_coords(coords: list[tuple[float, float]], bounds: tuple):
+def normalize_coords(coords: CoordinateSequence | ndarray, bounds: tuple):
     minx, miny, maxx, maxy = bounds
     width = maxx - minx
     height = maxy - miny
@@ -71,7 +73,7 @@ def normalize_coords(coords: list[tuple[float, float]], bounds: tuple):
     return normalized_coords
 
 
-def denormalize_coords(normalized_coords: list[tuple[float, float]], bounds: tuple):
+def denormalize_coords(normalized_coords: CoordinateSequence | ndarray, bounds: tuple):
     minx, miny, maxx, maxy = bounds
     width = maxx - minx
     height = maxy - miny
@@ -94,7 +96,7 @@ def generate_points(area_to_fill: Polygon, radius):
     return points_in_polygon
 
 
-def geometry_to_multilinestring(geom):
+def geom2multilinestring(geom):
     def convert_polygon(polygon: Polygon):
         lines = []
         exterior = LineString(polygon.exterior.coords)
@@ -135,8 +137,8 @@ def territory_splitter(
     if isinstance(splitters, list):
         splitters = pd.concat(splitters, ignore_index=True)
     splitters = splitters.to_crs(local_crs)
-    lines_orig = gdf_to_split.geometry.apply(geometry_to_multilinestring).to_list()
-    lines_splitters = splitters.geometry.apply(geometry_to_multilinestring).to_list()
+    lines_orig = gdf_to_split.geometry.apply(geom2multilinestring).to_list()
+    lines_splitters = splitters.geometry.apply(geom2multilinestring).to_list()
     polygons = (
         gpd.GeoDataFrame(geometry=list(polygonize(unary_union(lines_orig + lines_splitters))), crs=local_crs)
         .clip(gdf_to_split.to_crs(local_crs), keep_geom_type=True)
@@ -169,29 +171,6 @@ def territory_splitter(
         return polygons[~polygons["is_splitter"]].to_crs(original_crs).drop(columns=["is_splitter"])
 
     return polygons.to_crs(original_crs)
-
-
-def patch_polygon_interior(polygon: Polygon, patch_line_width=1) -> Polygon:
-    inner_geoms = [Polygon(ring) for ring in polygon.interiors]
-    while len(inner_geoms) > 0:
-        lines = []
-        for i in range(len(inner_geoms)):
-            all_but_cur = inner_geoms.copy()
-            poly = all_but_cur.pop(i)
-            lines.append(
-                LineString(nearest_points(poly, GeometryCollection(all_but_cur + [polygon.exterior])))
-                .buffer(patch_line_width / 2, resolution=2)
-                .exterior
-            )
-
-        polygons = list(polygonize(unary_union([geometry_to_multilinestring(polygon)] + lines)))
-        repr_point = polygon.representative_point()
-        for poly in polygons:
-            if poly.contains(repr_point):
-                polygon = poly
-                break
-        inner_geoms = [Polygon(ring) for ring in polygon.interiors]
-    return polygon
 
 
 def extend_linestring(line: LineString, distance: float = 1.0) -> LineString:

@@ -1,5 +1,4 @@
-use genplanner_rust::optimize;
-use std::panic;
+use genplanner_rust::optimize_zoning;
 
 fn problem() -> (
     Vec<f32>,
@@ -7,6 +6,7 @@ fn problem() -> (
     Vec<usize>,
     Vec<f32>,
     Vec<f32>,
+    Vec<(usize, usize)>,
     Vec<(usize, usize)>,
 ) {
     let vtxl2xy = vec![
@@ -31,42 +31,69 @@ fn problem() -> (
         0.08167938, 0.73924326, 0.50281405, 0.67901678, 0.94482486, 0.41431446, 0.89576776,
         0.78649612,
     ];
+    let site2xy = vec![
+        0.28491979, 0.13489279, 0.6017176, 0.1940188, 0.49459345, 0.41327259, 0.06940726,
+        0.34087542, 0.25852828, 0.40456545, 0.07813921, 0.64791354, 0.22101018, 0.76049471,
+        0.47205412, 0.63926244, 0.07558851, 0.94805753, 0.06097742, 0.01198044, 0.80570092,
+        0.60743768, 0.30859309, 0.92972624, 0.60807224, 0.91034297, 0.7262668, 0.32673491,
+        0.87499822, 0.7815844, 0.83753651, 0.97418581, 0.88346317, 0.15924984, 0.46831809,
+        0.02541823, 0.99353099, 0.51600862, 0.70621294, 0.01274023
+    ];
 
-    let site2room = vec![
+    let point2zone = vec![
         3, 4, 1, 3, 2, 0, 1, 0, 4, 2, 1, 2, 5, 5, 3, 5, 4, 0, 1, 0, 3, 2, 5, 0, 1,
+    ];
+    let point2zone = vec![
+        3, 4, 1, 3, 2, 0, 1, 0, 4, 2, 1, 2, 5, 5, 3, 5, 4, 0, 1, 0,
     ];
     let site2xy2flag = vec![
         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
     ];
+    let site2xy2flag = vec![
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0,
+    ];
     let room2area_trg = vec![
         0.09799259, 0.09799259, 0.09799259, 0.09799259, 0.09799259, 0.04355226,
     ];
-    let room_connections = vec![];
+    let room_connections = vec![(0,3)];
+    let room_forbidden = vec![(0,4),(0,1),(0,5),(0,2)];
     (
+        vtxl2xy,
+        site2xy,
+        point2zone,
+        site2xy2flag,
+        room2area_trg,
+        room_connections,
+        room_forbidden,
+    )
+}
+
+fn main() -> anyhow::Result<()> {
+    let (
         vtxl2xy,
         site2xy,
         site2room,
         site2xy2flag,
         room2area_trg,
         room_connections,
-    )
-}
+        room_forbidden,
+    ) = problem();
 
 
-fn main() -> anyhow::Result<()> {
-    let (vtxl2xy, site2xy, site2room, site2xy2flag, room2area_trg, room_connections) = problem();
-
-    let create_gif = true;
-    let res = optimize(
-            vtxl2xy,
-            site2xy,
-            site2room,
-            site2xy2flag,
-            room2area_trg,
-            room_connections,
-            create_gif,
-        )?;
+    optimize_zoning(
+        vtxl2xy,
+        site2xy,
+        site2room,
+        site2xy2flag,
+        room2area_trg,
+        room_connections,
+        room_forbidden,
+        true,
+        "test_run".parse()?
+    )?;
     Ok(())
 }

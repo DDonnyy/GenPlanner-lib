@@ -1,7 +1,7 @@
-use candle_core::{Result, Tensor};
+use std::collections::HashSet;
 use crate::voronoi2::VoronoiInfo;
+use candle_core::{Result, Tensor};
 use nalgebra::Vector2;
-
 
 fn topology(
     voronoi_info: &VoronoiInfo,
@@ -15,7 +15,7 @@ fn topology(
             if i_room == usize::MAX {
                 return usize::MAX;
             }
-            let j_site = voronoi_info.idx2site[voronoi_info.site2idx[i_site] + i_face];
+            let j_site = voronoi_info.idx2site[voronoi_info.point2cell_idx[i_site] + i_face];
             if j_site == usize::MAX {
                 return usize::MAX;
             }
@@ -27,7 +27,7 @@ fn topology(
             return j_site;
         };
         del_msh_core::elem2group::from_polygon_mesh(
-            &voronoi_info.site2idx[..],
+            &voronoi_info.point2cell_idx[..],
             siteface2adjsitesameroom,
         )
     };
@@ -93,8 +93,8 @@ fn is_two_room_connected(
 ) -> bool {
     let mut is_connected = false;
     for &i_site in room2site[i0_room].iter() {
-        for &j_site in
-            &voronoi_info.idx2site[voronoi_info.site2idx[i_site]..voronoi_info.site2idx[i_site + 1]]
+        for &j_site in &voronoi_info.idx2site
+            [voronoi_info.point2cell_idx[i_site]..voronoi_info.point2cell_idx[i_site + 1]]
         {
             if j_site == usize::MAX {
                 continue;
@@ -139,7 +139,6 @@ fn v2(p: &[f32; 2]) -> Vector2<f32> {
     Vector2::new(p[0], p[1])
 }
 
-
 pub fn compute_topo_loss(
     site2xy: &Tensor,
     site2room: &[usize],
@@ -151,9 +150,12 @@ pub fn compute_topo_loss(
     let (num_group, site2group, room2group) = topology(voronoi_info, num_room, site2room);
     let room2site = inverse_map(num_room, site2room);
     let group2site = inverse_map(num_group, &site2group);
+
     let site2xy0 = site2xy.flatten_all()?.to_vec1::<f32>()?;
     assert_eq!(site2xy0.len(), num_site * 2);
     let mut site2xytrg = site2xy0.clone();
+
+    // existing logic: split-fix + required connections
     for i_room in 0..num_room {
         assert!(!room2group[i_room].is_empty());
         if room2group[i_room].len() == 1 {
@@ -188,7 +190,9 @@ pub fn compute_topo_loss(
                 for &j_group in room2group[i_room].iter() {
                     for &j_site in &group2site[j_group] {
                         // this site has cell
-                        if voronoi_info.site2idx[j_site + 1] > voronoi_info.site2idx[j_site] {
+                        if voronoi_info.point2cell_idx[j_site + 1]
+                            > voronoi_info.point2cell_idx[j_site]
+                        {
                             i_group = j_group;
                             break;
                         }
@@ -210,7 +214,6 @@ pub fn compute_topo_loss(
                 }
                 continue;
             }
-            // assert!(i_group!=usize::MAX);
             for ij_group in 0..room2group[i_room].len() {
                 let j_group = room2group[i_room][ij_group];
                 if i_group == j_group {
@@ -235,6 +238,7 @@ pub fn compute_topo_loss(
             }
         }
     }
+
     let site2xytrg = Tensor::from_vec(
         site2xytrg,
         candle_core::Shape::from_dims(&[num_site, 2usize]),
@@ -288,73 +292,62 @@ pub fn compute_group_fix_loss(
     (site2xy - site2xytrg).unwrap().sqr()?.sum_all()
 }
 
-// pub fn kmean_style(
-//     site2xy: &candle_core::Tensor,
-//     site2room: &[usize],
-//     num_room: usize,
-//     voronoi_info: &VoronoiInfo,
-//     rooom_connections: &Vec<(usize, usize)>,
-// ) -> candle_core::Result<candle_core::Tensor> {
-//     let (num_group, site2group, room2group)
-//         = topology(voronoi_info, num_room, site2room);
-//     let room2site = inverse_map(num_room, site2room);
-//     let group2site = inverse_map(num_group, &site2group);
-//     let edge2roomgroup = {
-//         let mut edge2roomgroup = vec![(0usize, false); 0];
-//         // edge for divided room
-//         for i_room in 0..num_room {
-//             if room2group[i_room].len() <= 1 {
-//                 continue;
-//             }
-//             for i_group in &room2group[i_room] {
-//                 edge2roomgroup.push((i_room, true));
-//                 edge2roomgroup.push((*i_group, false));
-//             }
-//         }
-//         // edge for missing room connection
-//         for &(i0_room, i1_room) in rooom_connections {
-//             let is_connected = is_two_room_connected(
-//                 i0_room, i1_room, site2room, &room2site, voronoi_info);
-//             if is_connected { continue; }
-//             edge2roomgroup.push((i0_room, true));
-//             edge2roomgroup.push((i1_room, true));
-//         }
-//         edge2roomgroup
-//     };
-//     let num_site = site2room.len();
-//     let num_edge = edge2roomgroup.len() / 2;
-//     let mut edge2site = vec![0f32; num_edge * num_site];
-//     for i_edge in 0..num_edge {
-//         for i_node in 0..2 {
-//             let sign: f32 = if i_node == 0 { 1f32 } else { -1f32 };
-//             let (irg, is_room) = edge2roomgroup[i_edge * 2 + i_node];
-//             if is_room {
-//                 let i_room = irg;
-//                 let w0 = 1f32 / room2site[i_room].len() as f32;
-//                 for i_site in &room2site[i_room] {
-//                     edge2site[i_edge * num_site + i_site] += w0 * sign;
-//                 }
-//             } else {
-//                 let i_group = irg;
-//                 let w0 = 1f32 / group2site[i_group].len() as f32;
-//                 for i_site in &group2site[i_group] {
-//                     edge2site[i_edge * num_site + i_site] += w0 * sign;
-//                 }
-//             }
-//         }
-//     }
-//     let edge2site = candle_core::Tensor::from_vec(
-//         edge2site,
-//         candle_core::Shape::from((num_edge, num_site)),
-//         &candle_core::Device::Cpu,
-//     )?;
-//     let edge2xy = edge2site.matmul(&site2xy)?;
-//     println!("    {:?}", edge2xy.shape().dims2()?);
-//     for i_room in 0..num_room {
-//         println!(
-//             "    room {} -> {:?}, {:?}",
-//             i_room, room2group[i_room], room2site[i_room]
-//         );
-//     }
-//     edge2xy.sqr()?.sum_all()
-// }
+pub fn edge2vtvx_forbidden_wall(
+    voronoi_info: &VoronoiInfo,
+    point2zone: &[usize],
+    zone_forbidden: &Vec<(usize, usize)>,
+) -> Vec<usize> {
+    // forbidden pairs as (min,max)
+    let mut forb = HashSet::<(usize, usize)>::new();
+    for &(a, b) in zone_forbidden.iter() {
+        if a == usize::MAX || b == usize::MAX || a == b {
+            continue;
+        }
+        let (x, y) = if a < b { (a, b) } else { (b, a) };
+        forb.insert((x, y));
+    }
+
+    let point2cell_idx = &voronoi_info.point2cell_idx;
+    let idx2vtxv = &voronoi_info.cell_idx2vertex_idx;
+
+    let mut edge2vtxv = Vec::<usize>::new();
+
+    for i_site in 0..point2cell_idx.len() - 1 {
+        let zi = point2zone[i_site];
+        if zi == usize::MAX {
+            continue;
+        }
+
+        let nv = point2cell_idx[i_site + 1] - point2cell_idx[i_site];
+        for i0 in 0..nv {
+            let i1 = (i0 + 1) % nv;
+            let idx = point2cell_idx[i_site] + i0;
+
+            let v0 = idx2vtxv[idx];
+            let v1 = idx2vtxv[point2cell_idx[i_site] + i1];
+
+            let j_site = voronoi_info.idx2site[idx];
+            if j_site == usize::MAX {
+                continue;
+            }
+            if i_site >= j_site {
+                continue; // avoid duplicates
+            }
+
+            let zj = point2zone[j_site];
+            if zj == usize::MAX || zi == zj {
+                continue;
+            }
+
+            let (a, b) = if zi < zj { (zi, zj) } else { (zj, zi) };
+            if !forb.contains(&(a, b)) {
+                continue;
+            }
+
+            edge2vtxv.push(v0);
+            edge2vtxv.push(v1);
+        }
+    }
+
+    edge2vtxv
+}

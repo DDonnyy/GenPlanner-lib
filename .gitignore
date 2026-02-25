@@ -1,36 +1,60 @@
-# Project caches
-.iduedu_cache/
-cache/
+ 
+# Python
+ 
 __pycache__/
+*.py[cod]
+*$py.class
+
+# pytest / mypy / ruff
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 
-# Python bytecode
-*.py[cod]
-*$py.class
-
-# Build / dist artifacts
-/dist/
-/build/
-/*.egg-info/
-
-# Virtual envs
-/.venv/
-/.env
-
-# IDE / tools
-/.idea/
-/.vscode/
-*.swp
-*.swo
-
-# Coverage / test artifacts
+# Coverage
 .coverage
 .coverage.*
 htmlcov/
 
-# Sphinx docs
+# Virtual environments
+.venv/
+.env/
+venv/
+
+# Build artifacts (Python)
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+ 
+# Rust
+ 
+# Compiled artifacts
+rust/target/
+
+# Rust wheels (maturin / setuptools-rust)
+rust/target/wheels/
+
+# Cargo lock
+rust/Cargo.lock
+
+ 
+# Caches / Local
+ 
+cache/
+dev/
+
+ 
+# IDE / Editors
+ 
+.idea/
+.vscode/
+*.swp
+*.swo
+
+ 
+# Docs (Sphinx)
+ 
 docs/_build/
 docs/_autoapi/
 docs/_autosummary/
@@ -38,10 +62,19 @@ docs/_doctrees/
 _build/
 _autosummary/
 
-# Local dev stuff
-/dev
-/poetry.lock
-
+ 
 # OS junk
+ 
 .DS_Store
 Thumbs.db
+
+ 
+# Logs
+ 
+*.log
+*.jsonl
+
+ 
+# Misc
+ 
+CACHEDIR.TAG

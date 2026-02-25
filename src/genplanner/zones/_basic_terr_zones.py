@@ -1,4 +1,4 @@
-from .terr_zones import (
+from .territory_zones import (
     agriculture_terr,
     business_terr,
     industrial_terr,

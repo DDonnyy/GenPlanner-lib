@@ -30,7 +30,7 @@ publish:
 update:
 	poetry update
 
-build_install_rust:
+dev_install_rust:
 	poetry run maturin develop
 
 build_release_rust:
@@ -64,3 +64,6 @@ push-tag:
 
 release: tag push-tag
 	@echo "Tagged and pushed v$(VERSION)."
+
+docs:
+	poetry run sphinx-build -b html docs/source docs/build/html

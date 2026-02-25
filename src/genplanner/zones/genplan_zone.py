@@ -1,13 +1,13 @@
 from ._basic_func_zones import *
-from .func_zones import FuncZone
+from .functional_zones import FunctionalZone
 
 
 class GenPlan:
-    func_zone_ratio: dict[FuncZone, float]
+    func_zone_ratio: dict[FunctionalZone, float]
     name: str
     min_zone_area: float
 
-    def __init__(self, name, func_zone_ratio: dict[FuncZone, float]):
+    def __init__(self, name, func_zone_ratio: dict[FunctionalZone, float]):
         self.func_zone_ratio = self._recalculate_ratio(func_zone_ratio)
         self.name = name
         self._calc_min_area()
@@ -18,7 +18,7 @@ class GenPlan:
         return {zone: ratio / r_sum for zone, ratio in func_zone_ratio.items()}
 
     def _calc_min_area(self):
-        self.min_zone_area = max([zone.min_zone_area / ratio for zone, ratio in self.func_zone_ratio.items()])
+        self.min_zone_area = max([zone.min_area / ratio for zone, ratio in self.func_zone_ratio.items()])
 
 
 gen_plan = GenPlan(
