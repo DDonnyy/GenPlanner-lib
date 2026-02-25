@@ -99,52 +99,77 @@ class ZoneRelationMatrix:
 
     @classmethod
     def from_dataframe(
-        cls,
-        df: pd.DataFrame,
-        *,
-        zones: Iterable[Zone],
-        value_map: Mapping[object, Relation] | None = None,
-        default: Relation = Relation.NEUTRAL,
+            cls,
+            df: pd.DataFrame,
+            *,
+            value_map: Mapping[object, Relation] | None = None,
+            default: Relation = Relation.NEUTRAL,
+            require_symmetric: bool = True,
     ) -> "ZoneRelationMatrix":
         """
-        df must be square; index/columns are zone identifiers (by default zone.name).
-        Unlike other builders, here we REQUIRE the df to be symmetric (by default),
-        because df is usually a human-edited artifact and asymmetry is a data error.
+        df must be square.
 
-        The created matrix is symmetric anyway, but we don't auto-fix df asymmetry
-        unless require_symmetric=False.
+        Requirements:
+        - df.index contains Zone objects
+        - df.columns contains Zone objects
+        - set(index) == set(columns)
+        - (optional) matrix must be symmetric (after mapping values)
         """
         if df.shape[0] != df.shape[1]:
             raise ValueError("DataFrame must be square (N x N)")
 
-        zones_t = tuple(zones)
-        cls._validate_unique(zones_t)
-
-        by_name = {z.name: z for z in zones_t}
-        mat = cls.empty(zones_t, default=default)
-
         if value_map is None:
             value_map = RELATION_VALUE_MAP
 
-        # validate labels
-        for lbl in list(df.index) + list(df.columns):
-            if str(lbl) not in by_name:
-                raise KeyError(f"Unknown zone label in df: {lbl!r}. Expected one of: {sorted(by_name)}")
+        # Validate index/columns are Zone
+        idx_zones = tuple(df.index)
+        col_zones = tuple(df.columns)
 
-        # fill matrix (symmetric write anyway)
-        for i_lbl in df.index:
-            if str(i_lbl) not in by_name:
-                continue
-            a = by_name[str(i_lbl)]
-            for j_lbl in df.columns:
-                if str(j_lbl) not in by_name:
-                    continue
-                b = by_name[str(j_lbl)]
-                raw = df.loc[i_lbl, j_lbl]
+        if not idx_zones or not col_zones:
+            raise ValueError("DataFrame index/columns cannot be empty")
+
+        for z in idx_zones:
+            if not isinstance(z, Zone):
+                raise TypeError(f"df.index must contain Zone objects, got: {type(z)!r}")
+        for z in col_zones:
+            if not isinstance(z, Zone):
+                raise TypeError(f"df.columns must contain Zone objects, got: {type(z)!r}")
+
+        # Validate same zone set
+        if set(idx_zones) != set(col_zones):
+            missing_in_cols = set(idx_zones) - set(col_zones)
+            missing_in_idx = set(col_zones) - set(idx_zones)
+            raise ValueError(
+                "df.index and df.columns must contain the same Zone set. "
+                f"Missing in columns: {list(missing_in_cols)!r}; missing in index: {list(missing_in_idx)!r}"
+            )
+
+        zones_t = idx_zones  # keep df.index order
+        cls._validate_unique(zones_t)
+
+        mat = cls.empty(zones_t, default=default)
+
+        if require_symmetric:
+            for a in zones_t:
+                for b in zones_t:
+                    raw_ab = df.loc[a, b]
+                    raw_ba = df.loc[b, a]
+                    rel_ab = value_map.get(raw_ab, None)
+                    rel_ba = value_map.get(raw_ba, None)
+                    if rel_ab is None or rel_ba is None:
+                        raise ValueError(f"Unmapped df values at ({a!r},{b!r}) or ({b!r},{a!r})")
+                    if rel_ab != rel_ba:
+                        raise ValueError(
+                            f"DataFrame is not symmetric at ({a!r},{b!r}): {raw_ab!r}->{rel_ab} "
+                            f"vs ({b!r},{a!r}): {raw_ba!r}->{rel_ba}"
+                        )
+
+        for a in zones_t:
+            for b in zones_t:
+                raw = df.loc[a, b]
                 rel = value_map.get(raw, None)
                 if rel is None:
-                    raise ValueError(f"Unmapped df value at ({i_lbl!r},{j_lbl!r}): {raw!r}")
-                # symmetric set (even if require_symmetric=False, we normalize)
+                    raise ValueError(f"Unmapped df value at ({a!r},{b!r}): {raw!r}")
                 mat._m[a][b] = rel
                 mat._m[b][a] = rel
 

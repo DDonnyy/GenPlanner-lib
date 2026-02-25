@@ -14,7 +14,8 @@ from tqdm.contrib.concurrent import process_map
 
 matplotlib.use("Agg")
 
-LOG_PATH = Path("../dev/test_mf2tz_101_f2tz_attempt_0.jsonl")
+LOG_PATH = Path("../dev/gp_240226_18_16/_mf2tz_proxy_attempt_1.jsonl")
+
 
 LOSS_YSCALE = "linear"  # "linear" / "log" / "symlog"
 FPS = 60

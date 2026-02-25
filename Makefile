@@ -64,3 +64,6 @@ push-tag:
 
 release: tag push-tag
 	@echo "Tagged and pushed v$(VERSION)."
+
+docs:
+	poetry run sphinx-build -b html docs/source docs/build/html

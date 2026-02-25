@@ -1,10 +1,3 @@
-from genplanner._config import config
-from genplanner.tasks.feat2terr import feature2terr_zones_initial
-from genplanner.tasks.polygon_splitter import split_polygon
-
-roads_width_def = config.roads_width_def.copy()
-
-
 def poly2func2terr2block_initial(task, **kwargs):
     pass
     # territory, genplan, split_further = task

@@ -5,9 +5,9 @@ import numpy as np
 import pandas as pd
 from numpy import ndarray
 from scipy.stats.qmc import PoissonDisk
-from shapely import GeometryCollection, LineString, MultiLineString, MultiPolygon, Point, Polygon
+from shapely import LineString, MultiLineString, MultiPolygon, Point, Polygon
 from shapely.coords import CoordinateSequence
-from shapely.ops import nearest_points, polygonize, unary_union
+from shapely.ops import polygonize, unary_union
 
 
 def rotate_poly(poly: Polygon | MultiPolygon, pivot_point, angle_rad) -> Polygon | MultiPolygon:
@@ -21,10 +21,10 @@ def elastic_wrap(gdf: gpd.GeoDataFrame) -> Polygon:
     multip = gpd.GeoDataFrame(geometry=[gdf.union_all()], crs=gdf.crs).explode(ignore_index=True)
     max_dist = (
         np.ceil(multip.apply(lambda row: multip.drop(row.name).distance(row.geometry).min(), axis=1).max(axis=0)) + 0.1
-    )
+    ) * 1.1
     if pd.isna(max_dist):
         max_dist = 1
-    poly = multip.buffer(max_dist + 1).union_all().buffer(-max_dist)
+    poly = multip.buffer(max_dist + 1, resolution=2).union_all().buffer(-max_dist, resolution=2)
     if isinstance(poly, MultiPolygon):
         return elastic_wrap(gpd.GeoDataFrame(geometry=[poly], crs=gdf.crs))
     poly = Polygon(poly.exterior)

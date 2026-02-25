@@ -212,7 +212,7 @@ def prepare_fixed_points_and_balance_ratios(
 ) -> tuple[gpd.GeoDataFrame, dict]:
 
     if fix_points is None:
-        fix_points = gpd.GeoDataFrame(columns=['fixed_zone'])
+        fix_points = gpd.GeoDataFrame(columns=["fixed_zone"])
     else:
         if "fixed_zone" not in fix_points.columns:
             raise GenPlannerArgumentError("Column 'fixed_zone' is missing in the fixed_points GeoDataFrame.")
@@ -228,7 +228,7 @@ def prepare_fixed_points_and_balance_ratios(
             existing_labels = set(fix_points["fixed_zone"])
             sfx = sfx[~sfx["fixed_zone"].isin(existing_labels)]
         if len(sfx) > 0:
-            fix_points = pd.concat([fix_points, sfx[["fixed_zone", "geometry"]]], ignore_index=True)
+            fix_points = pd.concat([sfx[["fixed_zone", "geometry"]], fix_points], ignore_index=True)
 
     fixed_zones_values = set(fix_points["fixed_zone"])
     invalid_zones = fixed_zones_values - valid_zones_keys
@@ -257,10 +257,18 @@ def prepare_fixed_points_and_balance_ratios(
             a = float(row["__area__"])
             existing_ratios_by_zone[z] = a / total_area
         balanced_ratio_dict = {}
+        zero_ratio_zones = set()
         for z, target in zones_ratio_dict.items():
             existed = existing_ratios_by_zone.get(z, 0.0)
             remaining = max(float(target) - float(existed), 0.0)
-            balanced_ratio_dict[z] = remaining
+
+            if remaining > 0:
+                balanced_ratio_dict[z] = remaining
+            else:
+                zero_ratio_zones.add(z)
+
         zones_ratio_dict = balanced_ratio_dict
+        if len(zero_ratio_zones) > 0 and len(fix_points) > 0:
+            fix_points = fix_points[~fix_points["fixed_zone"].isin(zero_ratio_zones)].copy()
 
     return fix_points, zones_ratio_dict

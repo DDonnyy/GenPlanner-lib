@@ -1,0 +1,2 @@
+from .forbidden_terr_kind import FORBIDDEN_NEIGHBORHOOD
+from .relation_matrix import ZoneRelationMatrix, Relation

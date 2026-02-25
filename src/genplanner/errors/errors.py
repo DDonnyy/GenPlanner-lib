@@ -1,39 +1,37 @@
-class SplitPolygonValidationError(ValueError):
-    """Raised when _split_polygon input arguments fail fast validation."""
-
-    def __init__(self, field: str, message: str):
-        super().__init__(f"{field}: {message}")
-        self.field = field
+class GenPlannerBaseError(Exception):
+    def __init__(self, message: str, run_name: str | None = None):
+        self.run_name = run_name
         self.message = message
+        super().__init__(message, run_name)
+
+    def __str__(self):
+        if self.run_name:
+            return f"[{self.run_name}] {self.message}"
+        return self.message
 
 
-class GenPlannerRuntimeError(RuntimeError):
-    pass
+class SplitPolygonValidationError(GenPlannerBaseError):
+    def __init__(self, field: str, message: str, run_name: str | None = None):
+        self.field = field
+        full_message = f"{field}: {message}"
+        super().__init__(full_message, run_name)
 
 
-class GenPlannerInitError(Exception):
+class GenPlannerInitError(GenPlannerBaseError):
     """Raised when GenPlanner initialization fails."""
 
-    pass
+
+class RelationMatrixError(GenPlannerBaseError):
+    """Raised when there is an error in relation matrix construction or usage."""
 
 
-class RelationMatrixError(Exception):
-    """Raised when there is an error in ZoneRelationMatrix construction or usage."""
-
-    pass
-
-
-class GenPlannerArgumentError(ValueError):
+class GenPlannerArgumentError(GenPlannerBaseError):
     """Raised when invalid arguments are passed to GenPlanner methods."""
-
-    pass
 
 
 class FixPointsOutsideTerritoryError(GenPlannerArgumentError):
     """Raised when fixed points are outside the territory polygon."""
 
-    pass
 
-
-class GenplannerInfeasibleMultiFeatureError(GenPlannerRuntimeError):
-    pass
+class GenplannerInfeasibleMultiFeatureError(GenPlannerBaseError):
+    """Raised when multi-feature setup is infeasible."""

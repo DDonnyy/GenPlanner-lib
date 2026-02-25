@@ -40,32 +40,39 @@ class MultiPolygonSplitError(Exception):
     pass
 
 
-def _validate_zone_ratios(zone_ratios):
+def _validate_zone_ratios(zone_ratios, *, run_name: str | None = None):
     if not isinstance(zone_ratios, dict):
         raise SplitPolygonValidationError(
-            "zone_ratios", f"expected dict[BaseZone, float], got {type(zone_ratios).__name__}"
+            "zone_ratios",
+            f"expected dict[BaseZone, float], got {type(zone_ratios).__name__}",
+            run_name=run_name,
         )
     if not zone_ratios:
-        raise SplitPolygonValidationError("zone_ratios", "must be non-empty")
+        raise SplitPolygonValidationError("zone_ratios", "must be non-empty", run_name=run_name)
 
     for k, v in zone_ratios.items():
         if not isinstance(k, Zone):
             raise SplitPolygonValidationError(
-                "zone_ratios", f"all keys must be BaseZone, got key {k!r} of type {type(k).__name__}"
+                "zone_ratios",
+                f"all keys must be BaseZone, got key {k!r} of type {type(k).__name__}",
+                run_name=run_name,
             )
         if not _is_finite_number(v):
             raise SplitPolygonValidationError(
-                "zone_ratios", f"all values must be finite numbers (float), got {v!r} of type {type(v).__name__}"
+                "zone_ratios",
+                f"all values must be finite numbers (float), got {v!r} of type {type(v).__name__}",
+                run_name=run_name,
             )
         if v <= 0.0:
-            raise SplitPolygonValidationError("zone_ratios", f"ratio for {k!r} must be > 0, got {v}")
+            raise SplitPolygonValidationError("zone_ratios", f"ratio for {k!r} must be > 0, got {v}", run_name=run_name)
 
 
-def _validate_zone_pairs(field: str, pairs):
+def _validate_zone_pairs(field: str, pairs, *, run_name: str | None = None):
     if not isinstance(pairs, list):
         raise SplitPolygonValidationError(
             field,
             f"expected list[tuple[BaseZone, BaseZone]], got {type(pairs).__name__}",
+            run_name=run_name,
         )
     if not pairs:
         return
@@ -77,33 +84,37 @@ def _validate_zone_pairs(field: str, pairs):
             raise SplitPolygonValidationError(
                 field,
                 f"item #{i} must be tuple(BaseZone, BaseZone), got {item!r}",
+                run_name=run_name,
             )
         a, b = item
         if not isinstance(a, Zone) or not isinstance(b, Zone):
             raise SplitPolygonValidationError(
                 field,
-                f"item #{i} must contain BaseZone objects, got " f"({type(a).__name__}, {type(b).__name__})",
+                f"item #{i} must contain BaseZone objects, got ({type(a).__name__}, {type(b).__name__})",
+                run_name=run_name,
             )
         if a == b:
             raise SplitPolygonValidationError(
                 field,
                 f"item #{i}: self-pair ({a!r}, {b!r}) is not allowed",
+                run_name=run_name,
             )
         key = frozenset((a, b))
         if key in seen_undirected:
             raise SplitPolygonValidationError(
                 field,
-                f"duplicate undirected pair found at item #{i}: ({a!r}, {b!r}) "
-                f"(duplicates also include reversed order)",
+                f"duplicate undirected pair found at item #{i}: ({a!r}, {b!r}) (duplicates also include reversed order)",
+                run_name=run_name,
             )
         seen_undirected.add(key)
 
 
-def _validate_zone_fixed_point(zone_fixed_point):
+def _validate_zone_fixed_point(zone_fixed_point, *, run_name: str | None = None):
     if not isinstance(zone_fixed_point, dict):
         raise SplitPolygonValidationError(
             "zone_fixed_point",
             f"expected dict[BaseZone, Point], got {type(zone_fixed_point).__name__}",
+            run_name=run_name,
         )
 
     if not zone_fixed_point:
@@ -114,31 +125,36 @@ def _validate_zone_fixed_point(zone_fixed_point):
             raise SplitPolygonValidationError(
                 "zone_fixed_point",
                 f"key must be BaseZone, got {type(k).__name__}",
+                run_name=run_name,
             )
 
         if not isinstance(v, Point):
             raise SplitPolygonValidationError(
                 "zone_fixed_point",
                 f"value for {k!r} must be shapely.geometry.Point, got {type(v).__name__}",
+                run_name=run_name,
             )
 
         if v.is_empty or not v.is_valid:
             raise SplitPolygonValidationError(
                 "zone_fixed_point",
                 f"Point for {k!r} must be non-empty and valid",
+                run_name=run_name,
             )
 
 
-def _validate_bool(field: str, v):
+def _validate_bool(field: str, v, *, run_name: str | None = None):
     if not isinstance(v, bool):
-        raise SplitPolygonValidationError(field, f"expected bool, got {type(v).__name__}")
+        raise SplitPolygonValidationError(field, f"expected bool, got {type(v).__name__}", run_name=run_name)
 
 
-def _validate_run_name(run_name):
+def _validate_run_name(run_name, *, run_name_for_error: str | None = None):
     if not isinstance(run_name, str):
-        raise SplitPolygonValidationError("run_name", f"expected str, got {type(run_name).__name__}")
+        raise SplitPolygonValidationError(
+            "run_name", f"expected str, got {type(run_name).__name__}", run_name=run_name_for_error
+        )
     if not run_name.strip():
-        raise SplitPolygonValidationError("run_name", "must be a non-empty string")
+        raise SplitPolygonValidationError("run_name", "must be a non-empty string", run_name=run_name_for_error)
 
 
 def _validate_split_polygon_args(
@@ -151,14 +167,15 @@ def _validate_split_polygon_args(
     allow_multipolygon=False,
     write_logs=False,
 ) -> None:
-    _validate_zone_ratios(zone_ratios)
-    _validate_zone_pairs("zone_neighbors", zone_neighbors)
-    _validate_zone_pairs("zone_forbidden", zone_forbidden)
-    _validate_zone_fixed_point(zone_fixed_point)
-    _validate_run_name(run_name)
-    _validate_bool("allow_multipolygon", allow_multipolygon)
-    _validate_bool("write_logs", write_logs)
-    _validate_bool("normalize_rotation", normalize_rotation)
+    _validate_run_name(run_name, run_name_for_error=None)
+
+    _validate_zone_ratios(zone_ratios, run_name=run_name)
+    _validate_zone_pairs("zone_neighbors", zone_neighbors, run_name=run_name)
+    _validate_zone_pairs("zone_forbidden", zone_forbidden, run_name=run_name)
+    _validate_zone_fixed_point(zone_fixed_point, run_name=run_name)
+    _validate_bool("allow_multipolygon", allow_multipolygon, run_name=run_name)
+    _validate_bool("write_logs", write_logs, run_name=run_name)
+    _validate_bool("normalize_rotation", normalize_rotation, run_name=run_name)
 
     declared = set(zone_ratios.keys())
     for a, b in zone_neighbors:
@@ -166,18 +183,21 @@ def _validate_split_polygon_args(
             raise SplitPolygonValidationError(
                 "zone_neighbors",
                 f"zone {a!r} or {b!r} not present in zone_ratios keys",
+                run_name=run_name,
             )
     for a, b in zone_forbidden:
         if a not in declared or b not in declared:
             raise SplitPolygonValidationError(
                 "zone_forbidden",
                 f"zone {a!r} or {b!r} not present in zone_ratios keys",
+                run_name=run_name,
             )
     for z in zone_fixed_point.keys():
         if z not in declared:
             raise SplitPolygonValidationError(
                 "zone_fixed_point",
                 f"zone {z!r} not present in zone_ratios keys",
+                run_name=run_name,
             )
 
 
@@ -185,6 +205,8 @@ def _allocate_sites_ratio(
     zone_ratios: dict["Zone", float],
     total_sites: int,
     min_per_zone: int = 2,
+    *,
+    run_name: str | None = None,
 ) -> dict["Zone", int]:
     """
     Allocate total_sites across zones proportional to sqrt(ratio),
@@ -195,12 +217,12 @@ def _allocate_sites_ratio(
     Z = len(zones)
 
     if Z == 0:
-        raise SplitPolygonValidationError("zone_ratios", "must be non-empty")
+        raise SplitPolygonValidationError("zone_ratios", "must be non-empty", run_name=run_name)
     if total_sites < min_per_zone * Z:
         raise SplitPolygonValidationError(
             "sites_allocation",
-            f"total_sites={total_sites} is too small for min_per_zone={min_per_zone} and Z={Z} "
-            f"(need at least {min_per_zone * Z})",
+            f"total_sites={total_sites} is too small for min_per_zone={min_per_zone} and Z={Z} (need at least {min_per_zone * Z})",
+            run_name=run_name,
         )
 
     ratios = np.array([float(zone_ratios[z]) for z in zones], dtype=np.float64)
@@ -248,16 +270,21 @@ def _sample_points_from_global_pool(
     return pool[idx].copy()
 
 
-def _validate_polygon(polygon_to_split) -> tuple[Polygon, list[LineString]]:
+def _validate_polygon(polygon_to_split, *, run_name: str | None = None) -> tuple[Polygon, list[LineString]]:
     if not isinstance(polygon_to_split, Polygon):
         raise SplitPolygonValidationError(
             "polygon_to_split",
             f"expected shapely.geometry.Polygon, got {type(polygon_to_split).__name__}",
+            run_name=run_name,
         )
     if polygon_to_split.is_empty:
-        raise SplitPolygonValidationError("polygon_to_split", "polygon is empty")
+        raise SplitPolygonValidationError("polygon_to_split", "polygon is empty", run_name=run_name)
     if not polygon_to_split.is_valid:
-        raise SplitPolygonValidationError("polygon_to_split", "polygon is not valid (self-intersection or similar)")
+        raise SplitPolygonValidationError(
+            "polygon_to_split",
+            "polygon is not valid (self-intersection or similar)",
+            run_name=run_name,
+        )
 
     new_roads = []
 
@@ -313,7 +340,7 @@ def split_polygon(
         normalize_rotation=normalize_rotation,
     )
 
-    polygon_to_split, roads_lines = _validate_polygon(polygon_to_split)
+    polygon_to_split, roads_lines = _validate_polygon(polygon_to_split, run_name=run_name)
 
     areas_init = pd.DataFrame(list(zone_ratios.items()), columns=["zone", "ratio"])
     fallback_zone_name = areas_init.loc[areas_init["ratio"].idxmax(), "zone"]
@@ -358,7 +385,9 @@ def split_polygon(
     Z = len(zone_ratios)
     total_sites = sites_multiplier * Z
 
-    zone2count = _allocate_sites_ratio(zone_ratios=zone_ratios, total_sites=total_sites, min_per_zone=2)
+    zone2count = _allocate_sites_ratio(
+        zone_ratios=zone_ratios, total_sites=total_sites, min_per_zone=2, run_name=run_name
+    )
     counts_by_idx = np.zeros(Z, dtype=np.int64)
     for z, cnt in zone2count.items():
         counts_by_idx[zone2idx[z]] = cnt
@@ -366,7 +395,7 @@ def split_polygon(
 
     if seed is not None:
         if not isinstance(seed, int):
-            raise ValueError("seed must be int or None")
+            raise SplitPolygonValidationError("seed", "seed must be int or None", run_name=run_name)
         run_seed = seed & 0xFFFFFFFF
     else:
         run_seed = np.random.SeedSequence().entropy
@@ -471,7 +500,7 @@ def split_polygon(
                 if (multipolygon_count < best_multipolygon_count) or (
                     multipolygon_count == best_multipolygon_count and area_error < best_error
                 ):
-                    best_generation = (zones_gdf.copy(), roads_gdf.copy())
+                    best_generation = (zones_gdf.explode(ignore_index=True), roads_gdf.copy())
                     best_multipolygon_count = multipolygon_count
                     best_error = area_error
 
@@ -484,10 +513,10 @@ def split_polygon(
         except MultiPolygonSplitError:
             continue
         except RuntimeError as e:
-            print(e)
+            print(f"[{attempt_run_name}] {e}")
             continue
         except Exception as e:
-            raise e
+            raise RuntimeError(f"[{attempt_run_name}] {e}") from e
 
     best_zones, best_roads = best_generation
     if len(best_zones) > 0:

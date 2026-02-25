@@ -1,8 +1,9 @@
 import concurrent.futures
 import multiprocessing
 import os
-import time
+import queue
 from datetime import datetime
+from pathlib import Path
 from typing import Literal
 
 import geopandas as gpd
@@ -31,6 +32,18 @@ logger = config.logger
 
 
 class GenPlanner:
+    """
+    Attributes:
+        original_territory: Copy of the input `features_gdf`.
+        original_crs: CRS of the input territory.
+        local_crs: Estimated local projected CRS (UTM).
+        territory_to_work_with: Prepared working territory polygons in `local_crs`.
+        existing_terr_zones: Prepared existing zones in `local_crs`.
+        static_fix_points: Fixed points derived from existing zones (column `fixed_zone`).
+        user_roads: Prepared roads in `local_crs` (column `roads_width` always present).
+        source_multipolygon: True if the working territory contains multiple polygons.
+        run_name: Run identifier (and log directory prefix).
+    """
 
     def __init__(
         self,
@@ -40,7 +53,7 @@ class GenPlanner:
         exclude_gdf: gpd.GeoDataFrame | None = None,
         exclude_buffer: float = 5,
         existing_terr_zones: gpd.GeoDataFrame | None = None,
-        existing_tz_fill_ratio: float = 0.8,
+        existing_tz_fill_ratio: float = 0.7,
         existing_tz_merge_radius=50,
         simplify_geometry_value=0.01,
         parallel=True,
@@ -49,8 +62,76 @@ class GenPlanner:
         run_name=None,
     ):
         """
-        - simplify_geometry_value: do not affect output zones geometry, only used for internal calculations.
-         Higher value can speed up the process, but can lead to less accurate results. Value is in normalized 0-1 space.
+        Initialize a territory zoning pipeline.
+
+        The planner prepares the input territory geometry into a working GeoDataFrame
+        in a local projected CRS, optionally applies exclusions, cuts the territory by
+        roads, integrates existing territorial zones, and configures runtime settings
+        such as parallel execution and optimizer logging.
+
+        High-level preprocessing steps:
+          1) Keep only Polygon/MultiPolygon features from `features_gdf`.
+          2) Reproject to a local CRS (estimated UTM) and explode multipart geometries.
+          3) If `exclude_gdf` is provided: clip, buffer by `exclude_buffer`, subtract.
+          4) If `roads_gdf` is provided: normalize/deduplicate, extend by
+             `roads_extend_distance`, split the territory, and keep roads that intersect
+             produced splitters; fill missing `roads_width` with a default and warn.
+          5) If `existing_terr_zones` is provided: validate schema, clip to territory,
+             merge territory fragments into existing zones when coverage ratio exceeds
+             `existing_tz_fill_ratio`, then cut the remaining territory by those zones.
+          6) If existing zones exist: build static fixed points from existing zones
+             using `existing_tz_merge_radius` and snap them to the territory boundary.
+
+        Args:
+            features_gdf:
+                Input territory geometry as a GeoDataFrame. Only Polygon and MultiPolygon
+                geometries are used. If the final working set has more than one polygon,
+                the planner will run a "multi feature" task variant.
+            roads_gdf:
+                Optional roads GeoDataFrame used to split the territory. Any geometry type
+                is accepted, but it is expected to contain line-like geometries after
+                normalization. The `roads_width` column is optional; if missing, it will
+                be filled with a default width and a warning will be logged.
+            roads_extend_distance:
+                Distance (in local CRS units, typically meters) used to extend road
+                linestrings before splitting.
+            exclude_gdf:
+                Optional exclusion geometries (e.g., water, protected areas). If provided,
+                they are buffered and subtracted from the territory.
+            exclude_buffer:
+                Buffer distance (local CRS units) applied to `exclude_gdf` before subtraction.
+            existing_terr_zones:
+                Optional existing territorial zones to preserve and merge into the output.
+                If provided, it must contain a `territory_zone` column.
+            existing_tz_fill_ratio:
+                Minimum ratio of a territory polygon area that must be covered by an
+                existing zone for that polygon to be merged into the existing zone
+                instead of being split further. Must be in [0, 1].
+            existing_tz_merge_radius:
+                Radius (local CRS units) used to merge nearby fragments of the same
+                existing zone when deriving static fix points, and to stabilize representative
+                point selection.
+            simplify_geometry_value:
+                Internal simplification factor in normalized 0..1 space used for speed/robustness
+                trade-offs. It does not directly change the final output geometry, but can
+                influence processing.
+            parallel:
+                Whether to use multiprocessing for downstream tasks. If disabled or if the
+                machine has fewer than 2 CPUs, execution is forced to single-worker mode.
+            parallel_max_workers:
+                Maximum worker count for parallel execution. If None and parallel is enabled,
+                defaults to `max(1, cpu_count - 1)`.
+            rust_write_logs:
+                If True, enables Rust optimizer logs and creates a directory for `run_name`.
+            run_name:
+                Optional run identifier used as a log/artifact prefix. If None, an auto name
+                like `gp_DDMMYY_HH_MM` is generated.
+
+        Raises:
+            GenPlannerInitError:
+                If `features_gdf` has no valid Polygon/MultiPolygon geometries, or CRS checks fail,
+                or `existing_terr_zones` is provided without the required `territory_zone` column.
+
         """
         self.original_territory = features_gdf.copy()
         self.original_crs = features_gdf.crs
@@ -97,7 +178,7 @@ class GenPlanner:
             logger.info("Rust optimizer logs enabled.")
         if run_name is None:
             now = datetime.now()
-            self.run_name = now.strftime("gp%d%m%y_%H:%M")
+            self.run_name = now.strftime("gp_%d%m%y_%H_%M")
         else:
             self.run_name = str(run_name)
 
@@ -111,7 +192,7 @@ class GenPlanner:
         existing_terr_zones: gpd.GeoDataFrame,
         existing_tz_fill_ratio: float,
         existing_tz_merge_radius: float,
-    ) -> Polygon | MultiPolygon:
+    ):
 
         features_gdf = features_gdf[features_gdf.geom_type.isin(["MultiPolygon", "Polygon"])]
 
@@ -147,15 +228,18 @@ class GenPlanner:
 
     def _run(self, initial_func, *args, **kwargs):
         task_queue = multiprocessing.Queue()
+        run_name = f"{self.run_name}/"
         kwargs.update(
             {
                 "rust_write_logs": self.rust_write_logs,
                 "simplify": self.simplify_geometry_value,
                 "local_crs": self.local_crs.to_epsg(),
-                "run_name": self.run_name,
+                "run_name": run_name,
             }
         )
-
+        if self.rust_write_logs:
+            log_path = Path(run_name)
+            log_path.mkdir(parents=True, exist_ok=True)
         task_queue.put((initial_func, args, kwargs))
         generated_zones, generated_roads = split_queue(
             task_queue, self.local_crs, parallel=self.parallel, max_workers=self.parallel_max_workers
@@ -170,6 +254,184 @@ class GenPlanner:
         complete_zones = territory_splitter(complete_zones, roads_poly, reproject_attr=True).reset_index(drop=True)
 
         return complete_zones.to_crs(self.original_crs), generated_roads.to_crs(self.original_crs)
+
+    RelationMatrixArg = ZoneRelationMatrix | Literal["empty", "default"] | None
+
+    def features2terr_zones(
+        self,
+        funczone: FunctionalZone = basic_func_zone,
+        relation_matrix: RelationMatrixArg = "default",
+        terr_zones_fix_points: gpd.GeoDataFrame = None,
+    ) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
+        """
+        Generate territorial zones for the prepared territory.
+
+        Runs the full zoning pipeline and produces territorial zone polygons
+        without further subdivision into blocks. The method respects existing
+        territorial zones (if provided at initialization), integrates static
+        fix points derived from them, and balances target ratios accordingly.
+
+        The pipeline performs:
+          - validation and optional adjustment of zone ratios,
+          - validation and merging of fixed points,
+          - resolution of the relation matrix (adjacency/forbidden rules),
+          - task execution (single or multi-feature),
+          - merging of generated and existing zones,
+          - road-based splitting of final geometries.
+
+        Args:
+            funczone:
+                Functional zoning definition containing a mapping
+                of territorial zone kinds to target area ratios.
+                Must be an instance of ``FunctionalZone``.
+
+            relation_matrix:
+                Zone adjacency/preference definition.
+
+                Supported values:
+                  - "default": builds a matrix using predefined forbidden
+                    neighborhood rules for the zone kinds in ``funczone``.
+                  - "empty": creates an empty relation matrix with no
+                    encoded adjacency constraints.
+                  - ZoneRelationMatrix instance: validated against the
+                    zone kinds of ``funczone`` (missing zones raise an error;
+                    extra zones produce a warning).
+                  - None: treated as "default".
+
+            terr_zones_fix_points:
+                Optional GeoDataFrame of fixed zone anchor points.
+
+                Required schema:
+                  - geometry: Point (all geometries must be Points)
+                  - fixed_zone: str (must match keys of ``funczone.zones_ratio``)
+
+                Validation rules:
+                  - All geometries must be Points.
+                  - All ``fixed_zone`` values must exist in the zone ratio dict.
+                  - All points must lie within the working territory.
+                  - If existing zones reduce a zone’s remaining ratio to zero,
+                    corresponding fixed points are removed automatically.
+
+        Returns:
+            tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
+                A pair ``(zones_gdf, roads_gdf)`` in the original input CRS:
+
+                  - zones_gdf:
+                        Final territorial zone polygons, including merged
+                        existing zones (if provided).
+                  - roads_gdf:
+                        Road geometries used/generated during splitting.
+                        The column ``roads_width`` is always present.
+
+        Raises:
+            GenPlannerArgumentError:
+                If ``funczone`` is not a ``FunctionalZone`` or if
+                ``terr_zones_fix_points`` schema is invalid.
+
+            FixPointsOutsideTerritoryError:
+                If any fixed point lies outside the working territory.
+
+            RelationMatrixError:
+                If the relation matrix is invalid or inconsistent with
+                the zone kinds in ``funczone``.
+
+        """
+        return self._features2terr_zones(funczone, relation_matrix, terr_zones_fix_points, split_further=False)
+
+    def features2terr_zones2blocks(
+        self,
+        funczone: FunctionalZone = basic_func_zone,
+        relation_matrix: RelationMatrixArg = "default",
+        terr_zones_fix_points: gpd.GeoDataFrame = None,
+    ) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
+        """
+        Generate territorial zones and subdivide them into blocks.
+
+        Executes the same zoning pipeline as :meth:`features2terr_zones`,
+        but additionally performs subdivision of territorial zone polygons
+        into smaller block polygons according to zone-specific constraints
+        (e.g., minimum block area).
+
+        All preprocessing steps, validation rules, relation matrix handling,
+        fixed point integration, and existing zone balancing are identical
+        to :meth:`features2terr_zones`.
+
+        Args:
+            funczone:
+                Functional zoning definition containing territorial zone kinds
+                and their target area ratios. Must be a ``FunctionalZone``.
+
+            relation_matrix:
+                Zone adjacency/preference definition. Supported values:
+
+                  - "default": builds a relation matrix from predefined
+                    forbidden neighborhood rules.
+                  - "empty": creates an empty relation matrix.
+                  - ZoneRelationMatrix instance: validated against
+                    ``funczone`` zone kinds.
+                  - None: treated as "default".
+
+            terr_zones_fix_points:
+                Optional GeoDataFrame of fixed zone anchor points.
+
+                Required schema:
+                  - geometry: Point
+                  - fixed_zone: str (must match zone names in ``funczone``)
+
+                All validation and balancing rules are identical to
+                :meth:`features2terr_zones`.
+
+        Returns:
+            tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
+                A pair ``(blocks_gdf, roads_gdf)`` in the original input CRS:
+
+                  - blocks_gdf:
+                        Subdivided polygons after the additional block-splitting
+                        stage (may include both zone-level and block-level outputs,
+                        depending on downstream logic).
+                  - roads_gdf:
+                        Road geometries used/generated during splitting.
+
+        Raises:
+            GenPlannerArgumentError:
+                If ``funczone`` is invalid or fixed point schema is incorrect.
+
+            FixPointsOutsideTerritoryError:
+                If any fixed point lies outside the working territory.
+
+            RelationMatrixError:
+                If the relation matrix is invalid or inconsistent.
+
+        """
+        return self._features2terr_zones(funczone, relation_matrix, terr_zones_fix_points, split_further=True)
+
+    def _features2terr_zones(
+        self,
+        funczone: FunctionalZone,
+        relation_matrix: RelationMatrixArg,
+        terr_zones_fix_points: gpd.GeoDataFrame,
+        split_further: bool,
+    ) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
+
+        if not isinstance(funczone, FunctionalZone):
+            raise GenPlannerArgumentError("funczone arg must be of type FunctionalZone")
+
+        new_fixed_zones, new_zone_ratio = prepare_fixed_points_and_balance_ratios(
+            funczone.zones_ratio,
+            terr_zones_fix_points,
+            self.static_fix_points,
+            self.territory_to_work_with,
+            self.existing_terr_zones,
+        )
+        new_funczone = FunctionalZone(new_zone_ratio, funczone.name)
+
+        relation_matrix = resolve_relation_matrix(new_funczone, relation_matrix)
+
+        args = self.territory_to_work_with, new_funczone, relation_matrix, new_fixed_zones, split_further
+
+        if self.source_multipolygon:
+            return self._run(multi_feature2terr_zones_initial, *args)
+        return self._run(feature2terr_zones_initial, *args)
 
     # def split_features(
     #     self, zones_ratio_dict: dict = None, zones_n: int = None, roads_width=None, fixed_zones: gpd.GeoDataFrame = None
@@ -204,102 +466,80 @@ class GenPlanner:
     #         self.territory_to_work_with["territory_zone"] = terr_zone
     #     return self._run(multi_feature2blocks_initial, self.territory_to_work_with)
 
-    RelationMatrixArg = ZoneRelationMatrix | Literal["empty", "default"] | None
 
-    def features2terr_zones(
-        self,
-        funczone: FunctionalZone = basic_func_zone,
-        relation_matrix: RelationMatrixArg = "default",
-        terr_zones_fix_points: gpd.GeoDataFrame = None,
-    ) -> (gpd.GeoDataFrame, gpd.GeoDataFrame):
-        return self._features2terr_zones(funczone, relation_matrix, terr_zones_fix_points, split_further=False)
-
-    def features2terr_zones2blocks(
-        self,
-        funczone: FunctionalZone = basic_func_zone,
-        relation_matrix: RelationMatrixArg = "default",
-        terr_zones_fix_points: gpd.GeoDataFrame = None,
-    ) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
-
-        return self._features2terr_zones(funczone, relation_matrix, terr_zones_fix_points, split_further=True)
-
-    def _features2terr_zones(
-        self,
-        funczone: FunctionalZone,
-        relation_matrix: RelationMatrixArg,
-        terr_zones_fix_points: gpd.GeoDataFrame,
-        split_further: bool,
-    ) -> (gpd.GeoDataFrame, gpd.GeoDataFrame):
-
-        if not isinstance(funczone, FunctionalZone):
-            raise GenPlannerArgumentError("funczone arg must be of type FunctionalZone")
-
-        new_fixed_zones, new_zone_ratio = prepare_fixed_points_and_balance_ratios(
-            funczone.zones_ratio,
-            terr_zones_fix_points,
-            self.static_fix_points,
-            self.territory_to_work_with,
-            self.existing_terr_zones,
-        )
-        new_funczone = FunctionalZone(new_zone_ratio, funczone.name)
-
-        relation_matrix = resolve_relation_matrix(new_funczone, relation_matrix)
-
-        args = self.territory_to_work_with, new_funczone, relation_matrix, new_fixed_zones, split_further
-
-        if self.source_multipolygon:
-            return self._run(multi_feature2terr_zones_initial, *args)
-        return self._run(feature2terr_zones_initial, *args)
+def _merge_gdfs(gdfs: list[gpd.GeoDataFrame], local_crs):
+    if not gdfs:
+        return gpd.GeoDataFrame()
+    return gpd.GeoDataFrame(pd.concat(gdfs, ignore_index=True), crs=local_crs, geometry="geometry")
 
 
 def split_queue(
-    task_queue: multiprocessing.Queue, local_crs, parallel, max_workers
-) -> (gpd.GeoDataFrame, gpd.GeoDataFrame):
-    splitted = []
-    roads_all = []
+    task_queue: multiprocessing.Queue,
+    local_crs,
+    parallel: bool,
+    max_workers: int | None,
+) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
+
+    splitted: list[gpd.GeoDataFrame] = []
+    roads_all: list[gpd.GeoDataFrame] = []
 
     if not parallel:
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    else:
-        executor = concurrent.futures.ProcessPoolExecutor(max_workers)
-
-    with executor:
-        future_to_task = {}
         while True:
-            while not task_queue.empty() and len(future_to_task) < executor._max_workers:
+            try:
                 func, task, kwargs = task_queue.get_nowait()
-                future = executor.submit(func, task, **kwargs)
-
-                future_to_task[future] = task
-
-            done, _ = concurrent.futures.wait(future_to_task.keys(), return_when=concurrent.futures.FIRST_COMPLETED)
-
-            for future in done:
-                future_to_task.pop(future)
-                result: dict = future.result()
-                new_tasks = result.get("new_tasks", [])
-                if len(new_tasks) > 0:
-                    for func, new_task, kwargs in new_tasks:
-                        task_queue.put((func, new_task, kwargs))
-
-                generated_zones = result.get("generation", gpd.GeoDataFrame())
-
-                if len(generated_zones) > 0:
-                    splitted.append(generated_zones)
-
-                generated_roads = result.get("generated_roads", gpd.GeoDataFrame())
-                if len(generated_roads) > 0:
-                    roads_all.append(generated_roads)
-
-            time.sleep(0.01)
-            if not future_to_task and task_queue.empty():
+            except queue.Empty:
                 break
 
-    if len(roads_all) > 0:
-        roads_to_return = gpd.GeoDataFrame(pd.concat(roads_all, ignore_index=True), crs=local_crs, geometry="geometry")
-    else:
-        roads_to_return = gpd.GeoDataFrame()
-    return (
-        gpd.GeoDataFrame(pd.concat(splitted, ignore_index=True), crs=local_crs, geometry="geometry"),
-        roads_to_return,
-    )
+            result: dict = func(task, **kwargs)
+
+            for nt in result.get("new_tasks", []) or []:
+                task_queue.put(nt)
+
+            gen = result.get("generation")
+            if isinstance(gen, gpd.GeoDataFrame) and len(gen) > 0:
+                splitted.append(gen)
+
+            roads = result.get("generated_roads")
+            if isinstance(roads, gpd.GeoDataFrame) and len(roads) > 0:
+                roads_all.append(roads)
+
+        return _merge_gdfs(splitted, local_crs), _merge_gdfs(roads_all, local_crs)
+
+    workers = int(max_workers or multiprocessing.cpu_count())
+
+    future_to_nothing: dict[concurrent.futures.Future, None] = {}
+
+    with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+        while True:
+            while len(future_to_nothing) < workers:
+                try:
+                    func, task, kwargs = task_queue.get_nowait()
+                except queue.Empty:
+                    break
+                future = executor.submit(func, task, **kwargs)
+                future_to_nothing[future] = None
+
+            if not future_to_nothing:
+                break
+
+            done, _ = concurrent.futures.wait(
+                future_to_nothing.keys(),
+                return_when=concurrent.futures.FIRST_COMPLETED,
+            )
+
+            for fut in done:
+                future_to_nothing.pop(fut, None)
+                result: dict = fut.result()
+
+                for nt in result.get("new_tasks", []) or []:
+                    task_queue.put(nt)
+
+                gen = result.get("generation")
+                if isinstance(gen, gpd.GeoDataFrame) and len(gen) > 0:
+                    splitted.append(gen)
+
+                roads = result.get("generated_roads")
+                if isinstance(roads, gpd.GeoDataFrame) and len(roads) > 0:
+                    roads_all.append(roads)
+
+    return _merge_gdfs(splitted, local_crs), _merge_gdfs(roads_all, local_crs)
