@@ -135,7 +135,7 @@ def cut_by_existing_terr_zones(
             f"CRS mismatch between features_gdf({features_gdf.crs}) and existing_terr_zones({existing_terr_zones.crs})."
         )
 
-    existing_terr_zones = existing_terr_zones.clip(features_gdf, keep_geom_type=True)
+    existing_terr_zones = existing_terr_zones.clip(features_gdf, keep_geom_type=True).reset_index(drop=True)
 
     splitted_territory = territory_splitter(features_gdf, existing_terr_zones, return_splitters=True).reset_index(
         drop=True

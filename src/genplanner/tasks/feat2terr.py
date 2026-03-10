@@ -28,8 +28,8 @@ def filter_terr_zone(terr_zones: pd.DataFrame, area) -> pd.DataFrame:
 
     terr_zones = recalculate_ratio(terr_zones, area)
     while not terr_zones["good"].all():
-        terr_zones = terr_zones[terr_zones["good"]].copy()
         logger.debug(f"removed terr_zones {terr_zones[~terr_zones['good']]}")
+        terr_zones = terr_zones[terr_zones["good"]].copy()
         terr_zones = recalculate_ratio(terr_zones, area)
     return terr_zones
 
@@ -54,6 +54,26 @@ def multi_feature2terr_zones_initial(task, **kwargs):
         columns=["ratio", "min_block_area"],
     )
     terr_zones = filter_terr_zone(terr_zones, initial_gdf["feature_area"].sum())
+
+    if len(terr_zones) <= 1:
+        if len(terr_zones) == 0:
+            terr_zone = max(func_zone.zones_ratio.items(), key=lambda x: x[1])[0]
+        else:
+            terr_zone = terr_zones.index[0]
+
+        block_splitter_gdf = initial_gdf[["geometry"]].copy()
+        block_splitter_gdf["territory_zone"] = terr_zone
+        block_splitter_gdf = block_splitter_gdf.explode(ignore_index=True)
+
+        kwargs = kwargs.copy()
+        kwargs.update({"func_zone": func_zone, "run_name": run_name})
+
+        if split_further:
+            return {"new_tasks": [(multi_feature2blocks_initial, (block_splitter_gdf,), kwargs)]}
+        else:
+            block_splitter_gdf["func_zone"] = func_zone
+            return {"new_tasks": [], "generation": block_splitter_gdf}
+
     terr_zone_list = tuple(terr_zones.index)
     relation_matrix = relation_matrix.subset(terr_zone_list, strict=False)
 
@@ -112,7 +132,7 @@ def multi_feature2terr_zones_initial(task, **kwargs):
     zone_permitted = set(division["zone"].items())
     feature_point = feature_centroids.to_dict()
     dist_coef: dict[tuple, float] = {}
-    for (i, z) in zone_permitted:
+    for i, z in zone_permitted:
         anchor = zone_anchors.get(z)
         fp = feature_point.get(i)
         if anchor is None or fp is None:
@@ -135,9 +155,7 @@ def multi_feature2terr_zones_initial(task, **kwargs):
     x = {(i, z): pulp.LpVariable(f"feature index {i} zone type {z}", lowBound=0) for (i, z) in zone_permitted}
     y = {(i, z): pulp.LpVariable(f"y_{i}_{z}", cat="Binary") for (i, z) in zone_permitted}
 
-    model += (
-            pulp.lpSum(x[i, z] * dist_coef[(i, z)] for (i, z) in x)
-    ), "Minimize_Distance_To_Anchors"
+    model += (pulp.lpSum(x[i, z] * dist_coef[(i, z)] for (i, z) in x)), "Minimize_Distance_To_Anchors"
 
     for i in zone_capacity.keys():
         model += (
@@ -178,10 +196,10 @@ def multi_feature2terr_zones_initial(task, **kwargs):
 
     kwargs.update({"func_zone": func_zone, "run_name": run_name})
 
-    ready_for_blocks: list[gpd.GeoDataFrame] = []
+    ready_for_blocks_rows: list[dict] = []
     new_tasks: list[tuple] = []
 
-    alloc_pos = allocations.loc[allocations["assigned_area"] > 0].copy()
+    alloc_pos = allocations.loc[allocations["assigned_area"] > 0]
     groups = dict(tuple(alloc_pos.groupby("zone_index", sort=False)))
     initial_sel = initial_gdf.loc[list(groups.keys())]
 
@@ -192,51 +210,41 @@ def multi_feature2terr_zones_initial(task, **kwargs):
         n = len(terr_zones_in_poly)
         if n == 1:
             terr_zone = terr_zones_in_poly.iloc[0]["territorial_zone"]
-            ready_for_blocks.append(
-                gpd.GeoDataFrame(
-                    {"territory_zone": [terr_zone]},
-                    geometry=[zone_polygon],
-                    crs=local_crs,
-                ).explode(ignore_index=True)
-            )
+            ready_for_blocks_rows.append({"territory_zone": terr_zone, "geometry": zone_polygon})
             continue
 
-        if n > 1:
-            zone_area_total = zone_row["feature_area"]
-            zones_ratio_dict = {
-                row["territorial_zone"]: row["assigned_area"] / zone_area_total
-                for _, row in terr_zones_in_poly.iterrows()
-            }
+        zone_area_total = zone_row["feature_area"]
+        zones_ratio_dict = {
+            row["territorial_zone"]: row["assigned_area"] / zone_area_total for _, row in terr_zones_in_poly.iterrows()
+        }
 
-            task_gdf = gpd.GeoDataFrame(geometry=[zone_polygon], crs=local_crs)
-            task_func_zone = FunctionalZone(zones_ratio_dict, name=func_zone.name)
+        task_gdf = gpd.GeoDataFrame(geometry=[zone_polygon], crs=local_crs)
+        task_func_zone = FunctionalZone(zones_ratio_dict, name=func_zone.name)
 
-            needed_zones = list(zones_ratio_dict.keys())
-            task_fixed_terr_zones = upd_fix_terr_zones.loc[upd_fix_terr_zones["zone"].isin(needed_zones)].copy()
+        needed_zones = list(zones_ratio_dict.keys())
+        task_fixed_terr_zones = upd_fix_terr_zones.loc[upd_fix_terr_zones["zone"].isin(needed_zones)].copy()
 
-            task_fixed_terr_zones = task_fixed_terr_zones.rename(columns={"zone": "fixed_zone"})
-            task_fixed_terr_zones["geometry"] = task_fixed_terr_zones["geometry"].apply(
-                lambda fix_p: nearest_points(fix_p, zone_polygon.buffer(-0.1, resolution=1))[1]
+        task_fixed_terr_zones = task_fixed_terr_zones.rename(columns={"zone": "fixed_zone"})
+        task_fixed_terr_zones["geometry"] = task_fixed_terr_zones["geometry"].apply(
+            lambda fix_p: nearest_points(fix_p, zone_polygon.buffer(-0.1, resolution=1))[1]
+        )
+
+        task_fixed_terr_zones = task_fixed_terr_zones.loc[~task_fixed_terr_zones["geometry"].duplicated(keep="first")]
+        task_relation_matrix = relation_matrix.subset(needed_zones)
+
+        task_kwargs = kwargs.copy()
+        task_kwargs.update({"run_name": f"{run_name}_{ind}"})
+
+        new_tasks.append(
+            (
+                feature2terr_zones_initial,
+                (task_gdf, task_func_zone, task_relation_matrix, task_fixed_terr_zones, split_further),
+                task_kwargs,
             )
+        )
 
-            task_fixed_terr_zones = task_fixed_terr_zones.loc[
-                ~task_fixed_terr_zones["geometry"].duplicated(keep="first")
-            ]
-            task_relation_matrix = relation_matrix.subset(needed_zones)
-
-            task_kwargs = kwargs.copy()
-            task_kwargs.update({"run_name": f"{run_name}_{ind}"})
-
-            new_tasks.append(
-                (
-                    feature2terr_zones_initial,
-                    (task_gdf, task_func_zone, task_relation_matrix, task_fixed_terr_zones, split_further),
-                    task_kwargs,
-                )
-            )
-
-    if len(ready_for_blocks) > 0:
-        block_splitter_gdf = pd.concat(ready_for_blocks)
+    if ready_for_blocks_rows:
+        block_splitter_gdf = gpd.GeoDataFrame(ready_for_blocks_rows, crs=local_crs).explode(ignore_index=True)
     else:
         block_splitter_gdf = gpd.GeoDataFrame()
 
@@ -325,7 +333,7 @@ def feature2terr_zones_initial(task, **kwargs):
         return {"generation": zones, "generated_roads": roads}
 
     # if split further
-    kwargs.update({"func_zone": func_zone,"run_name": run_name})
+    kwargs.update({"func_zone": func_zone, "run_name": run_name})
     if len(zones) > 0:
         zones["territory_zone"] = zones["zone"]
     task = [(multi_feature2blocks_initial, (zones,), kwargs)]
