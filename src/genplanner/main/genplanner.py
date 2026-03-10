@@ -423,6 +423,21 @@ class GenPlanner:
             self.territory_to_work_with,
             self.existing_terr_zones,
         )
+        changes = []
+
+        all_zones = set(funczone.zones_ratio) | set(new_zone_ratio)
+
+        for zone in all_zones:
+            old_val = funczone.zones_ratio.get(zone)
+            new_val = new_zone_ratio.get(zone)
+
+            if old_val != new_val:
+                changes.append(f"{zone.name}: {old_val} -> {new_val}")
+
+        if changes:
+            changes_str = "\n".join(changes)
+            logger.debug(f"ratio changes:\n{changes_str}")
+
         new_funczone = FunctionalZone(new_zone_ratio, funczone.name)
 
         relation_matrix = resolve_relation_matrix(new_funczone, relation_matrix)

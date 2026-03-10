@@ -482,7 +482,7 @@ def split_polygon(
                 p0 = rotate_coords(p0, pivot_point, +angle_rad2rotate)
                 p1 = rotate_coords(p1, pivot_point, +angle_rad2rotate)
             line_coords = np.stack([p0, p1], axis=1)
-            road_geoms = list(linestrings(line_coords))
+            road_geoms = linestrings(line_coords).tolist()
             roads_gdf = gpd.GeoDataFrame(geometry=road_geoms + roads_lines, crs=local_crs)
 
             if multipolygon_count > 0:
