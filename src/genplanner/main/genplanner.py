@@ -2,6 +2,7 @@ import concurrent.futures
 import multiprocessing
 import os
 import queue
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -501,6 +502,7 @@ def split_queue(
     if not parallel:
         while True:
             try:
+                time.sleep(0.001)
                 func, task, kwargs = task_queue.get_nowait()
             except queue.Empty:
                 break
@@ -528,6 +530,7 @@ def split_queue(
         while True:
             while len(future_to_nothing) < workers:
                 try:
+                    time.sleep(0.001)
                     func, task, kwargs = task_queue.get_nowait()
                 except queue.Empty:
                     break
