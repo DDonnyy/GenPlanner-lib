@@ -109,7 +109,7 @@ Documentation
 
 Full documentation is available at:
 
-https://your-docs-url-here
+https://ddonnyy.github.io/GenPlanner-lib/
 
 Core modules:
 
