@@ -13,8 +13,8 @@
 .. image:: https://img.shields.io/badge/docs-GitHub%20Pages-blue
    :target: https://ddonnyy.github.io/GenPlanner-lib/
 
-.. image:: https://img.shields.io/badge/license-BSD--3--Clause-blue.svg
-   :target: https://opensource.org/licenses/BSD-3-Clause
+.. image:: https://img.shields.io/badge/license-Non--Commercial-red.svg
+   :target: LICENSE
 
 ------------------------------------------------
 
@@ -131,3 +131,9 @@ GenPlanner is built around a small set of composable primitives:
 
 The goal is deterministic, reproducible zoning with clear constraints
 and explicit spatial control.
+
+License
+-------
+This project is licensed under a Proprietary Non-Commercial License.
+
+Russian version available in LICENSE_RU.txt.
