@@ -30,15 +30,37 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          persist-credentials: false
       - name: Ensure this commit passed tests
         env:
           TESTED_SHA: ${{ github.event.workflow_run.head_sha }}
         run: test "$(git rev-parse HEAD)" = "$TESTED_SHA"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Use current Rust toolchain
+        run: |
+          rustup update stable
+          rustup default stable
+          cargo --version
+      - name: Install Python Semantic Release
+        run: python -m pip install 'python-semantic-release==9.21.1'
       - name: Python Semantic Release
         id: release
-        uses: python-semantic-release/python-semantic-release@v9.21.1
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          before="$(git rev-parse HEAD)"
+          semantic-release version
+          after="$(git rev-parse HEAD)"
+          if [ "$before" = "$after" ]; then
+            echo "released=false" >> "$GITHUB_OUTPUT"
+          else
+            tag="$(git tag --points-at "$after" --list 'v*')"
+            test -n "$tag"
+            echo "released=true" >> "$GITHUB_OUTPUT"
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          fi
       - name: Upload source distribution
         if: steps.release.outputs.released == 'true'
         uses: actions/upload-artifact@v4
