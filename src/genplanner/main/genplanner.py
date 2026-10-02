@@ -1,4 +1,5 @@
 import concurrent.futures
+import math
 import multiprocessing
 import os
 import queue
@@ -61,6 +62,8 @@ class GenPlanner:
         parallel_max_workers=None,
         rust_write_logs=False,
         run_name=None,
+        max_run_seconds: float | None = 900,
+        max_optimization_iterations: int = 2000,
     ):
         """
         Initialize a territory zoning pipeline.
@@ -127,6 +130,12 @@ class GenPlanner:
             run_name:
                 Optional run identifier used as a log/artifact prefix. If None, an auto name
                 like `gp_DDMMYY_HH_MM` is generated.
+            max_run_seconds:
+                Generation time budget in seconds, measured after initialization
+                (default: 900). Pass None to disable the limit. Raises TimeoutError
+                with the completed task count when exceeded.
+            max_optimization_iterations:
+                Maximum iterations for each Rust Voronoi optimization attempt.
 
         Raises:
             GenPlannerInitError:
@@ -138,6 +147,21 @@ class GenPlanner:
         self.original_crs = features_gdf.crs
         self.local_crs = features_gdf.estimate_utm_crs()
         self.simplify_geometry_value = simplify_geometry_value
+        if max_run_seconds is not None and (
+            isinstance(max_run_seconds, bool)
+            or not isinstance(max_run_seconds, (int, float))
+            or not math.isfinite(max_run_seconds)
+            or max_run_seconds <= 0
+        ):
+            raise ValueError("max_run_seconds must be a positive number or None")
+        if (
+            isinstance(max_optimization_iterations, bool)
+            or not isinstance(max_optimization_iterations, int)
+            or max_optimization_iterations < 1
+        ):
+            raise ValueError("max_optimization_iterations must be a positive integer")
+        self.max_run_seconds = max_run_seconds
+        self.max_optimization_iterations = max_optimization_iterations
         self.existing_terr_zones = gpd.GeoDataFrame()
         self.static_fix_points = gpd.GeoDataFrame()
         self.territory_to_work_with = gpd.GeoDataFrame()
@@ -228,14 +252,17 @@ class GenPlanner:
         self.territory_to_work_with = features_gdf
 
     def _run(self, initial_func, *args, **kwargs):
-        task_queue = multiprocessing.Queue()
+        task_queue = queue.Queue()
         run_name = f"{self.run_name}/"
+        deadline = time.monotonic() + self.max_run_seconds if self.max_run_seconds is not None else None
         kwargs.update(
             {
                 "rust_write_logs": self.rust_write_logs,
                 "simplify": self.simplify_geometry_value,
                 "local_crs": self.local_crs.to_epsg(),
                 "run_name": run_name,
+                "max_optimization_iterations": self.max_optimization_iterations,
+                "deadline": deadline,
             }
         )
         if self.rust_write_logs:
@@ -243,16 +270,25 @@ class GenPlanner:
             log_path.mkdir(parents=True, exist_ok=True)
         task_queue.put((initial_func, args, kwargs))
         generated_zones, generated_roads = split_queue(
-            task_queue, self.local_crs, parallel=self.parallel, max_workers=self.parallel_max_workers
+            task_queue,
+            self.local_crs,
+            parallel=self.parallel,
+            max_workers=self.parallel_max_workers,
+            deadline=deadline,
         )
 
         complete_zones = pd.concat([generated_zones, self.existing_terr_zones], ignore_index=True)
         generated_roads = pd.concat([generated_roads, self.user_roads], ignore_index=True)
 
+        if complete_zones.geometry.isna().any() or complete_zones.geometry.is_empty.any():
+            raise ValueError("Generated zones contain missing or empty geometries")
+
         roads_poly = generated_roads.copy()
         roads_poly.geometry = roads_poly.apply(lambda x: x.geometry.buffer(x.roads_width / 2, resolution=4), axis=1)
 
-        complete_zones = territory_splitter(complete_zones, roads_poly, reproject_attr=True).reset_index(drop=True)
+        complete_zones = territory_splitter(
+            complete_zones, roads_poly, reproject_attr=True, select_by_point=True
+        ).reset_index(drop=True)
 
         return complete_zones.to_crs(self.original_crs), generated_roads.to_crs(self.original_crs)
 
@@ -283,7 +319,7 @@ class GenPlanner:
         Args:
             funczone:
                 Functional zoning definition containing a mapping
-                of territorial zone kinds to target area ratios.
+                of TerritoryZone objects to target area ratios.
                 Must be an instance of ``FunctionalZone``.
 
             relation_matrix:
@@ -304,7 +340,7 @@ class GenPlanner:
 
                 Required schema:
                   - geometry: Point (all geometries must be Points)
-                  - fixed_zone: str (must match keys of ``funczone.zones_ratio``)
+                  - fixed_zone: TerritoryZone (must match keys of ``funczone.zones_ratio``)
 
                 Validation rules:
                   - All geometries must be Points.
@@ -359,7 +395,7 @@ class GenPlanner:
 
         Args:
             funczone:
-                Functional zoning definition containing territorial zone kinds
+                Functional zoning definition containing TerritoryZone objects
                 and their target area ratios. Must be a ``FunctionalZone``.
 
             relation_matrix:
@@ -377,7 +413,7 @@ class GenPlanner:
 
                 Required schema:
                   - geometry: Point
-                  - fixed_zone: str (must match zone names in ``funczone``)
+                  - fixed_zone: TerritoryZone (must match keys of ``funczone.zones_ratio``)
 
                 All validation and balancing rules are identical to
                 :meth:`features2terr_zones`.
@@ -490,24 +526,36 @@ def _merge_gdfs(gdfs: list[gpd.GeoDataFrame], local_crs):
 
 
 def split_queue(
-    task_queue: multiprocessing.Queue,
+    task_queue: queue.Queue,
     local_crs,
     parallel: bool,
     max_workers: int | None,
+    deadline: float | None = None,
 ) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
 
     splitted: list[gpd.GeoDataFrame] = []
     roads_all: list[gpd.GeoDataFrame] = []
+    completed_tasks = 0
+
+    def check_deadline():
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError(f"GenPlanner generation time limit exceeded after {completed_tasks} tasks")
 
     if not parallel:
         while True:
+            check_deadline()
             try:
                 time.sleep(0.001)
                 func, task, kwargs = task_queue.get_nowait()
             except queue.Empty:
                 break
 
-            result: dict = func(task, **kwargs)
+            try:
+                result: dict = func(task, **kwargs)
+            except TimeoutError as exc:
+                raise TimeoutError(f"GenPlanner generation time limit exceeded after {completed_tasks} tasks") from exc
+            completed_tasks += 1
+            check_deadline()
 
             for nt in result.get("new_tasks", []) or []:
                 task_queue.put(nt)
@@ -528,7 +576,9 @@ def split_queue(
 
     with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
         while True:
+            check_deadline()
             while len(future_to_nothing) < workers:
+                check_deadline()
                 try:
                     time.sleep(0.001)
                     func, task, kwargs = task_queue.get_nowait()
@@ -547,7 +597,14 @@ def split_queue(
 
             for fut in done:
                 future_to_nothing.pop(fut, None)
-                result: dict = fut.result()
+                try:
+                    result: dict = fut.result()
+                except TimeoutError as exc:
+                    raise TimeoutError(
+                        f"GenPlanner generation time limit exceeded after {completed_tasks} tasks"
+                    ) from exc
+                completed_tasks += 1
+                check_deadline()
 
                 for nt in result.get("new_tasks", []) or []:
                     task_queue.put(nt)

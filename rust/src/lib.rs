@@ -2,6 +2,7 @@ mod loss_topo;
 mod polygonmesh2_to_areas;
 mod polygonmesh2_to_cogs;
 mod voronoi2;
+mod voronoi_core;
 mod vtx2xyz_to_edgevector;
 
 use crate::voronoi2::VoronoiInfo;
@@ -24,7 +25,8 @@ use std::io::{BufWriter, Write};
     zone_neighbors,
     zone_forbidden,
     write_logs,
-    run_name
+    run_name,
+    max_iterations = 2000
 ))]
 fn optimize_territory_zoning(
     boundary_xy: Vec<f32>,
@@ -36,6 +38,7 @@ fn optimize_territory_zoning(
     zone_forbidden: Vec<(usize, usize)>,
     write_logs: bool,
     run_name: String,
+    max_iterations: usize,
 ) -> PyResult<(Vec<f32>, Vec<Vec<f32>>)> {
     let result = panic::catch_unwind(|| {
         optimize_zoning(
@@ -48,6 +51,7 @@ fn optimize_territory_zoning(
             zone_forbidden,
             write_logs,
             run_name,
+            max_iterations,
         )
     });
     match result {
@@ -162,7 +166,9 @@ pub fn optimize_zoning(
     zone_forbidden: Vec<(usize, usize)>,
     write_logs: bool,
     run_name: String,
+    max_iterations: usize,
 ) -> anyhow::Result<(Vec<f32>, Vec<Vec<f32>>)> {
+    anyhow::ensure!(max_iterations > 0, "max_iterations must be positive");
     let fixed_flags = point_fixed_mask.iter().filter(|&&x| x != 0.0).count();
 
     let num_zones = zone_target_area.len();
@@ -239,13 +245,13 @@ pub fn optimize_zoning(
 
     let n_sites = point2zone.len();
     let base_iterations = 1000;
-    let max_iterations = 2000;
     let mut num_iterations =
-        base_iterations + ((n_sites.saturating_sub(10) * (max_iterations - base_iterations)) / 50);
+        base_iterations + ((n_sites.saturating_sub(10) * 1000) / 50);
 
     if fixed_flags > 0 {
         num_iterations = (num_iterations as f32 * 1.1).round() as usize;
     }
+    num_iterations = num_iterations.min(max_iterations);
 
     let max_lr = 0.09;
     let min_lr = 0.002;
@@ -270,7 +276,7 @@ pub fn optimize_zoning(
         let (voronoi_vertices_xy, voronoi_info) =
             voronoi2::voronoi(&boundary_xy, &generator_points_xy, |i_site| {
                 point2zone[i_site] != usize::MAX
-            });
+            })?;
         let edge2vtxv_wall = edge2vtvx_wall(&voronoi_info, &point2zone);
 
         let loss_walllen = {
@@ -441,7 +447,7 @@ pub fn optimize_zoning(
     let (voronoi_vertices_xy_fin, voronoi_info_fin) =
         voronoi2::voronoi(&boundary_xy, &generator_points_xy, |i_site| {
             point2zone[i_site] != usize::MAX
-        });
+        })?;
 
     let edge2vtxv_wall_fin = edge2vtvx_wall(&voronoi_info_fin, &point2zone);
 

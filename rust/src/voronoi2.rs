@@ -30,11 +30,14 @@ impl candle_core::CustomOp1 for Layer {
         let num_cell_vertices = self.vtxv2info.len();
         let mut voronoi_vertices_xy = vec![0f32; num_cell_vertices * 2];
         for i_vtxv in 0..num_cell_vertices {
-            let cc = del_msh_core::voronoi2::position_of_voronoi_vertex(
+            let cc = crate::voronoi_core::position_of_voronoi_vertex(
                 &self.vtxv2info[i_vtxv],
                 &self.boundary_xy[..],
                 generator_points_xy,
             );
+            if !cc.iter().all(|value| value.is_finite()) {
+                return Err(candle_core::Error::Msg("Non-finite Voronoi vertex".to_string()));
+            }
             voronoi_vertices_xy[i_vtxv * 2 + 0] = cc[0];
             voronoi_vertices_xy[i_vtxv * 2 + 1] = cc[1];
         }
@@ -156,29 +159,22 @@ pub fn voronoi<F>(
     boundary_xy: &[f32],
     generator_points_xy: &Tensor,
     site2isalive: F,
-) -> (Tensor, VoronoiInfo)
+) -> anyhow::Result<(Tensor, VoronoiInfo)>
 where
     F: Fn(usize) -> bool,
 {
-    let site2cell = del_msh_core::voronoi2::voronoi_cells(
-        boundary_xy,
-        &generator_points_xy
-            .flatten_all()
-            .unwrap()
-            .to_vec1::<f32>()
-            .unwrap()[..],
-        &site2isalive,
-    );
-    let voronoi_mesh = del_msh_core::voronoi2::indexing(&site2cell[..]);
+    let sites = generator_points_xy.flatten_all()?.to_vec1::<f32>()?;
+    let site2cell = crate::voronoi_core::voronoi_cells(boundary_xy, &sites, &site2isalive)?;
+    let voronoi_mesh = crate::voronoi_core::indexing(&site2cell[..]);
     let site2_to_voronoi2 = Layer {
         boundary_xy: boundary_xy.to_vec(),
         vtxv2info: voronoi_mesh.vtxv2info.clone(),
     };
-    let voronoi_vertices_xy = generator_points_xy.apply_op1(site2_to_voronoi2).unwrap();
+    let voronoi_vertices_xy = generator_points_xy.apply_op1(site2_to_voronoi2)?;
     let idx2site = del_msh_core::elem2elem::from_polygon_mesh(
         &voronoi_mesh.site2idx,
         &voronoi_mesh.idx2vtxv,
-        voronoi_vertices_xy.dims2().unwrap().0,
+        voronoi_vertices_xy.dims2()?.0,
     );
     let voronoi_info = VoronoiInfo {
         point2cell_idx: voronoi_mesh.site2idx,
@@ -186,7 +182,7 @@ where
         vtxv2info: voronoi_mesh.vtxv2info,
         idx2site,
     };
-    (voronoi_vertices_xy, voronoi_info)
+    Ok((voronoi_vertices_xy, voronoi_info))
 }
 
 pub fn loss_lloyd(
