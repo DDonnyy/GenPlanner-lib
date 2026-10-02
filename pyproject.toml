@@ -59,6 +59,7 @@ bindings = "pyo3"
 manifest-path = "rust/Cargo.toml"
 python-source = "src"
 module-name = "genplanner._rust"
+include = [{ path = "LICENSE_RU.txt", format = "sdist" }]
 
 
 [tool.black]
@@ -104,7 +105,7 @@ version_variables = ["CITATION.cff:version"]
 assets = ["uv.lock"]
 tag_format = "v{version}"
 commit_message = "chore(release): v{version} [skip ci]\n\nAutomated release, see CHANGELOG.md."
-build_command = "python -m pip install uv 'maturin>=1.7,<2.0' && uv lock && maturin sdist --manifest-path rust/Cargo.toml --out dist"
+build_command = "python -m pip install uv 'maturin>=1.7,<2.0' && uv lock && maturin sdist --manifest-path rust/Cargo.toml --out dist && python scripts/check_sdist_metadata.py dist/*.tar.gz"
 allow_zero_version = false
 major_on_zero = true
 
