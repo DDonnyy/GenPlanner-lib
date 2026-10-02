@@ -19,9 +19,7 @@ from genplanner.zones import BasicZone, TerritoryZoneKind
 
 def test_block_geometries_keep_position_when_clip_indices_have_gaps(monkeypatch):
     zone = TerritoryZone(kind=TerritoryZoneKind.RESIDENTIAL, name="residential", min_block_area=1)
-    split_blocks = gpd.GeoDataFrame(
-        geometry=gpd.GeoSeries([box(0, 0, 1, 1), box(1, 0, 2, 1)], index=[1, 2]), crs=3857
-    )
+    split_blocks = gpd.GeoDataFrame(geometry=gpd.GeoSeries([box(0, 0, 1, 1), box(1, 0, 2, 1)], index=[1, 2]), crs=3857)
     split_blocks["zone"] = ["a", "b"]
     monkeypatch.setattr(feat2blocks, "split_polygon", lambda **kwargs: (split_blocks, gpd.GeoDataFrame()))
 
@@ -58,9 +56,7 @@ def test_point_selected_territory_faces_match_clipped_faces():
         ],
         crs=3857,
     )
-    roads = gpd.GeoDataFrame(
-        geometry=[LineString([(-100, 500), (2100, 500)]).buffer(15)], crs=3857
-    )
+    roads = gpd.GeoDataFrame(geometry=[LineString([(-100, 500), (2100, 500)]).buffer(15)], crs=3857)
 
     clipped = territory_splitter(territory, roads, reproject_attr=True)
     selected = territory_splitter(territory, roads, reproject_attr=True, select_by_point=True)
