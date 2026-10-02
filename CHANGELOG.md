@@ -2,6 +2,20 @@
 
 <!-- version list -->
 
+## v1.0.5 (2026-10-02)
+
+### Bug Fixes
+
+- **release**: Include declared licenses in source distributions
+  ([`f475e17`](https://github.com/DDonnyy/GenPlanner-lib/commit/f475e173e7e87ca3f2da1f97812909e343572ff5))
+
+Include the Russian license explicitly in maturin source archives.
+
+Validate declared license files before tagging and publishing a release.
+
+Build and inspect the source archive in CI before triggering release.
+
+
 ## v1.0.4 (2026-10-02)
 
 ### Bug Fixes
