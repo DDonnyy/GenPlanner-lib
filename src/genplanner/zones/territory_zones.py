@@ -1,8 +1,8 @@
 from dataclasses import dataclass
 from enum import Enum
 
-from genplanner.zones.abc_zone import Zone
 from genplanner import config
+from genplanner.zones.abc_zone import Zone
 
 
 class TerritoryZoneKind(str, Enum):
@@ -30,7 +30,7 @@ class TerritoryZone(Zone):
     A concrete territorial zone definition.
 
     `TerritoryZone` represents a specific zone within a territory plan. It has:
-      - a `kind` (from :class:`TerritoryZoneKind`),
+      - a `kind` (from :class:`genplanner.zones.territory_zones.TerritoryZoneKind`),
       - a human-readable `name`,
       - a minimum block area constraint (`min_block_area`).
 

@@ -41,9 +41,7 @@ class Zone(ABC):
         Subclasses should override this method and raise an exception if the
         zone is invalid.
 
-        Raises:
-            Exception: Implementations should raise `ValueError`/`TypeError`
-            (or custom errors) when invariants are violated.
+        Implementations should raise ValueError or TypeError when invalid.
         """
         pass
 

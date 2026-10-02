@@ -1,6 +1,8 @@
 Zone Relations
 ==============
 
+.. currentmodule:: genplanner
+
 Zone relations define adjacency constraints between zones.
 They are represented as a symmetric matrix where each cell specifies
 how two zones are allowed (or forbidden) to neighbor each other.
@@ -11,7 +13,7 @@ built from forbidden neighborhood rules.
 Relation values
 ---------------
 
-The matrix cells use the :class:`Relation` enum:
+The matrix cells use the :class:`~genplanner.zone_relations.relation_matrix.Relation` enum:
 
 - ``NEUTRAL`` — no constraint
 - ``NEIGHBOR`` — zones must / are encouraged to be neighbors
@@ -30,15 +32,15 @@ Example:
 ZoneRelationMatrix
 ------------------
 
-:class:`ZoneRelationMatrix` is a symmetric adjacency matrix with O(1) access.
+:class:`~genplanner.zone_relations.relation_matrix.ZoneRelationMatrix` is a symmetric adjacency matrix with O(1) access.
 
 Key properties:
 
 - Matrix is always symmetric.
 - Default relation is ``NEUTRAL``.
 - Zones must be unique and hashable.
-- Works with any :class:`Zone`, but typically used with
-  :class:`~genplanner.zones.TerritoryZone`.
+- Works with any :class:`~genplanner.zones.abc_zone.Zone`, but typically used with
+  :class:`~genplanner.zones.territory_zones.TerritoryZone`.
 
 Build Empty matrix
 ~~~~~~~~~~~~~~~~~~
@@ -90,7 +92,7 @@ GenPlanner ships with a predefined set:
 
    print(FORBIDDEN_NEIGHBORHOOD)
 
-The set contains pairs of :class:`TerritoryZoneKind` that must not neighbor.
+The set contains pairs of :class:`~genplanner.zones.territory_zones.TerritoryZoneKind` that must not neighbor.
 
 How it works
 ^^^^^^^^^^^^

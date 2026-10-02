@@ -1,8 +1,10 @@
 Errors
 ======
 
+.. currentmodule:: genplanner.errors
+
 GenPlanner defines a small hierarchy of custom exceptions.
-All errors inherit from :class:`GenPlannerBaseError`.
+All errors inherit from :class:`~genplanner.errors.errors.GenPlannerBaseError`.
 
 The base class supports an optional ``run_name`` attribute,
 which is included in the error message when present.
