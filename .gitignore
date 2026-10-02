@@ -9,11 +9,14 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.black-cache/
+.pylint-cache/
 
 # Coverage
 .coverage
 .coverage.*
 htmlcov/
+coverage.xml
 
 # Virtual environments
 .venv/
@@ -59,6 +62,7 @@ docs/_build/
 docs/_autoapi/
 docs/_autosummary/
 docs/_doctrees/
+docs/source/generated/
 _build/
 _autosummary/
 
@@ -78,3 +82,6 @@ Thumbs.db
 # Misc
  
 CACHEDIR.TAG
+
+# Local scenario visualizations
+reports/scenario_1552/

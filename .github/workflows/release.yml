@@ -1,74 +1,126 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_run:
+    workflows: ["Tests and Coverage"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
-  build-wheels:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ ubuntu-latest, windows-latest, macos-latest ]
-        py: [ "3.11", "3.12" ]
-        include:
-          - os: ubuntu-latest
-            py: "3.11"
-            py_tag: "cp311-cp311"
-          - os: ubuntu-latest
-            py: "3.12"
-            py_tag: "cp312-cp312"
-
+  version:
+    if: >
+      github.repository == 'DDonnyy/GenPlanner-lib' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      released: ${{ steps.release.outputs.released }}
+      tag: ${{ steps.release.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Ensure this commit passed tests
+        env:
+          TESTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: test "$(git rev-parse HEAD)" = "$TESTED_SHA"
+      - name: Python Semantic Release
+        id: release
+        uses: python-semantic-release/python-semantic-release@v9.21.1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload source distribution
+        if: steps.release.outputs.released == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
 
+  wheels:
+    needs: version
+    if: needs.version.outputs.released == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: "3.11"
+            python-tag: cp311-cp311
+          - os: ubuntu-latest
+            python-version: "3.12"
+            python-tag: cp312-cp312
+          - os: windows-latest
+            python-version: "3.11"
+          - os: windows-latest
+            python-version: "3.12"
+          - os: macos-latest
+            python-version: "3.11"
+          - os: macos-latest
+            python-version: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+          persist-credentials: false
       - uses: actions/setup-python@v5
         if: matrix.os != 'ubuntu-latest'
         with:
-          python-version: ${{ matrix.py }}
-
-      - name: Build wheels (Linux manylinux)
+          python-version: ${{ matrix.python-version }}
+      - name: Build manylinux wheel
         if: matrix.os == 'ubuntu-latest'
         uses: PyO3/maturin-action@v1
         with:
           command: build
-          args: --release --out dist -i /opt/python/${{ matrix.py_tag }}/bin/python
+          args: --release --out dist -i /opt/python/${{ matrix.python-tag }}/bin/python
           manylinux: auto
-
-      - name: Build wheels (Windows/macOS)
+      - name: Build Windows/macOS wheel
         if: matrix.os != 'ubuntu-latest'
         uses: PyO3/maturin-action@v1
         with:
           command: build
           args: --release --out dist -i python
           manylinux: off
-
-      - name: Upload wheels
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.os }}-py${{ matrix.py }}
-          path: dist/*
+          name: wheels-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: dist/*.whl
+          if-no-files-found: error
 
   publish:
-    needs: build-wheels
+    needs: [version, wheels]
+    if: needs.version.outputs.released == 'true'
     runs-on: ubuntu-latest
     permissions:
+      contents: write
       id-token: write
-      contents: read
-
+      actions: read
     steps:
       - uses: actions/download-artifact@v4
         with:
+          pattern: wheels-*
           path: dist
-
-      - name: Flatten dist
-        run: |
-          mkdir -p upload
-          find dist -name "*.whl" -exec cp {} upload/ \;
-          find dist -name "*.tar.gz" -exec cp {} upload/ \;
-
-      - name: Publish to PyPI (Trusted Publishing / OIDC)
-        uses: pypa/gh-action-pypi-publish@release/v1
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
         with:
-          packages-dir: upload
+          name: sdist
+          path: dist
+      - name: Attach distributions to GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
+        run: gh release upload "$RELEASE_TAG" dist/* --clobber
+      - name: Publish to PyPI (Trusted Publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1
