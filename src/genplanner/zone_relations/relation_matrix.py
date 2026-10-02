@@ -99,12 +99,12 @@ class ZoneRelationMatrix:
 
     @classmethod
     def from_dataframe(
-            cls,
-            df: pd.DataFrame,
-            *,
-            value_map: Mapping[object, Relation] | None = None,
-            default: Relation = Relation.NEUTRAL,
-            require_symmetric: bool = True,
+        cls,
+        df: pd.DataFrame,
+        *,
+        value_map: Mapping[object, Relation] | None = None,
+        default: Relation = Relation.NEUTRAL,
+        require_symmetric: bool = True,
     ) -> "ZoneRelationMatrix":
         """
         df must be square.

@@ -103,6 +103,8 @@ def multi_feature2terr_zones_initial(task, **kwargs):
         write_logs=kwargs["rust_write_logs"],
         seed=kwargs.get("seed", None),
         sites_multiplier=kwargs.get("sites_multiplier", 5),
+        max_iterations=kwargs.get("max_optimization_iterations", 2000),
+        deadline=kwargs.get("deadline"),
     )
 
     upd_fix_terr_zones = proxy_zones.copy()
@@ -315,6 +317,8 @@ def feature2terr_zones_initial(task, **kwargs):
             write_logs=kwargs["rust_write_logs"],
             seed=kwargs.get("seed", None),
             sites_multiplier=kwargs.get("sites_multiplier", 5),
+            max_iterations=kwargs.get("max_optimization_iterations", 2000),
+            deadline=kwargs.get("deadline"),
         )
     else:
         data = {"zone": [terr_zones.index[0]], "func_zone": [func_zone], "geometry": [polygon]}

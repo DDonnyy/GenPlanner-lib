@@ -4,6 +4,12 @@
 .. image:: https://img.shields.io/pypi/v/genplanner.svg
    :target: https://pypi.org/project/genplanner/
 
+.. image:: https://github.com/DDonnyy/GenPlanner-lib/actions/workflows/quality.yml/badge.svg
+   :target: https://github.com/DDonnyy/GenPlanner-lib/actions/workflows/quality.yml
+
+.. image:: https://raw.githubusercontent.com/DDonnyy/GenPlanner-lib/python-coverage-comment-action-data/badge.svg
+   :target: https://github.com/DDonnyy/GenPlanner-lib/tree/python-coverage-comment-action-data
+
 .. image:: https://github.com/DDonnyy/GenPlanner-lib/actions/workflows/release.yml/badge.svg
    :target: https://github.com/DDonnyy/GenPlanner-lib/actions/workflows/release.yml
 
@@ -45,6 +51,8 @@ Installation
 .. code-block:: bash
 
    pip install genplanner
+
+Python 3.11 and 3.12 are supported.
 
 
 Quick Example
@@ -117,6 +125,13 @@ Core modules:
 - Zones
 - Zone Relations
 - Errors
+- Configuration
+
+Citing
+------
+
+If GenPlanner contributes to your work, use the citation metadata in
+`CITATION.cff <https://github.com/DDonnyy/GenPlanner-lib/blob/main/CITATION.cff>`_.
 
 
 Design Philosophy

@@ -109,6 +109,8 @@ def feature2blocks_splitter(task, **kwargs):
         write_logs=kwargs["rust_write_logs"],
         seed=kwargs.get("seed", None),
         sites_multiplier=kwargs.get("sites_multiplier", 5),
+        max_iterations=kwargs.get("max_optimization_iterations", 2000),
+        deadline=kwargs.get("deadline"),
     )
     road_lvl = "local road"
     roads["road_lvl"] = f"{road_lvl}, level {deep}"
@@ -119,7 +121,10 @@ def feature2blocks_splitter(task, **kwargs):
             for key, value in kwargs.items()
             if key in ["territory_zone", "func_zone", "gen_plan"]
         }
-        blocks = gpd.GeoDataFrame(data=data, geometry=blocks.geometry, crs=local_crs)
+        # The split polygons retain their indices after clipping.  A GeoSeries
+        # passed here is aligned with the fresh data index, which can silently
+        # replace a valid polygon with None.
+        blocks = gpd.GeoDataFrame(data=data, geometry=blocks.geometry.to_list(), crs=local_crs)
         return {"generation": blocks, "generated_roads": roads}
     else:
         deep = deep + 1

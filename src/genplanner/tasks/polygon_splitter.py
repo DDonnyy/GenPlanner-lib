@@ -1,5 +1,6 @@
 import json
 import math
+import time
 
 import geopandas as gpd
 import numpy as np
@@ -10,7 +11,7 @@ from shapely.geometry import MultiPoint, MultiPolygon, Polygon
 from shapely.ops import nearest_points, polygonize, unary_union
 
 from genplanner._config import config
-from genplanner._rust import optimize_territory_zoning
+from genplanner._rust import optimize_territory_zoning  # pylint: disable=no-name-in-module
 from genplanner.errors.errors import SplitPolygonValidationError
 from genplanner.utils import (
     denormalize_coords,
@@ -327,6 +328,8 @@ def split_polygon(
     write_logs=False,
     seed=None,
     sites_multiplier=5,
+    max_iterations=2000,
+    deadline=None,
 ) -> (gpd.GeoDataFrame, gpd.GeoDataFrame):
 
     _validate_split_polygon_args(
@@ -339,6 +342,8 @@ def split_polygon(
         write_logs=write_logs,
         normalize_rotation=normalize_rotation,
     )
+    if not isinstance(max_iterations, int) or max_iterations < 1:
+        raise SplitPolygonValidationError("max_iterations", "must be a positive integer", run_name=run_name)
 
     polygon_to_split, roads_lines = _validate_polygon(polygon_to_split, run_name=run_name)
 
@@ -407,6 +412,8 @@ def split_polygon(
     best_error = float("inf")
 
     for i in range(attempts):
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError(f"GenPlanner generation time limit exceeded in {run_name}")
         try:
             attempt_seed = run_seed + i
             gen_points = _sample_points_from_global_pool(total_sites=total_sites, seed=attempt_seed)
@@ -450,7 +457,10 @@ def split_polygon(
                 zone_forbidden=zone_forbidden_idx,
                 write_logs=write_logs,
                 run_name=attempt_run_name,
+                max_iterations=max_iterations,
             )
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError(f"GenPlanner generation time limit exceeded in {run_name}")
 
             voronoi_coords = np.asarray(voronoi_coords, dtype=np.float64).reshape(-1, 2)
             voronoi_coords = denormalize_coords(voronoi_coords, bounds)  # shape (n, 2)
@@ -469,6 +479,15 @@ def split_polygon(
 
             zones_gdf = zones_gdf.clip(polygon_to_split, keep_geom_type=True)
             zones_gdf["zone"] = zones_gdf["zone_id"].map(idx2zone)
+
+            valid_geometry = (
+                zones_gdf.geometry.notna()
+                & ~zones_gdf.geometry.is_empty
+                & zones_gdf.geometry.is_valid
+                & zones_gdf.geom_type.isin(["Polygon", "MultiPolygon"])
+            )
+            if not valid_geometry.all() or set(zones_gdf["zone_id"]) != set(idx2zone):
+                raise RuntimeError("Voronoi clipping produced missing or empty zones")
 
             multipolygon_count = sum(isinstance(geom, MultiPolygon) for geom in zones_gdf.geometry)
 
@@ -512,8 +531,10 @@ def split_polygon(
 
         except MultiPolygonSplitError:
             continue
+        except TimeoutError:
+            raise
         except RuntimeError as e:
-            print(f"[{attempt_run_name}] {e}")
+            print(f"[{attempt_run_name} seed={attempt_seed}] {e}")
             continue
         except Exception as e:
             raise RuntimeError(f"[{attempt_run_name}] {e}") from e

@@ -1,6 +1,8 @@
 GenPlanner
 ==========
 
+.. currentmodule:: genplanner
+
 :class:`GenPlanner` is the main orchestration class of the library.
 It prepares input territory geometry, applies preprocessing (roads, exclusions,
 existing zones), and executes the zoning pipeline.
@@ -111,7 +113,7 @@ Requirements:
 
 - Geometry must be ``Point``
 - Column ``fixed_zone`` must be present
-- ``fixed_zone`` values must be :class:`~genplanner.zones.TerritoryZone` objects
+- ``fixed_zone`` values must be :class:`~genplanner.zones.territory_zones.TerritoryZone` objects
   present in ``funczone.zones_ratio``
 
 All fixed points must lie inside the working territory.

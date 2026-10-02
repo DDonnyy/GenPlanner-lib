@@ -260,7 +260,7 @@ In most cases you only need to pass a functional zone preset into the planner:
 .. tip::
    In fixed points GeoDataFrame, the ``fixed_zone`` column is matched against
    the keys of ``funczone.zones_ratio``. In the current implementation those keys
-   are :class:`~genplanner.zones.TerritoryZone` objects, so ``fixed_zone`` should
+   are :class:`~genplanner.zones.territory_zones.TerritoryZone` objects, so ``fixed_zone`` should
    contain the corresponding ``TerritoryZone`` instances.
 
 .. code-block:: python

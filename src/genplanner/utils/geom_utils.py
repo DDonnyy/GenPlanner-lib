@@ -129,6 +129,7 @@ def territory_splitter(
     splitters: gpd.GeoDataFrame | list[gpd.GeoDataFrame],
     return_splitters=False,
     reproject_attr=False,
+    select_by_point=False,
 ) -> gpd.GeoDataFrame:
 
     original_crs = gdf_to_split.crs
@@ -139,11 +140,17 @@ def territory_splitter(
     splitters = splitters.to_crs(local_crs)
     lines_orig = gdf_to_split.geometry.apply(geom2multilinestring).to_list()
     lines_splitters = splitters.geometry.apply(geom2multilinestring).to_list()
-    polygons = (
-        gpd.GeoDataFrame(geometry=list(polygonize(unary_union(lines_orig + lines_splitters))), crs=local_crs)
-        .clip(gdf_to_split.to_crs(local_crs), keep_geom_type=True)
-        .explode()
-    )
+    polygons = gpd.GeoDataFrame(geometry=list(polygonize(unary_union(lines_orig + lines_splitters))), crs=local_crs)
+    if select_by_point:
+        # The polygonized linework contains every territory boundary, so each
+        # face lies entirely inside or outside the input territory. A spatial
+        # lookup of one interior point avoids intersecting every face with the
+        # union of all zones, which is prohibitively slow for large plans.
+        face_points = gpd.GeoDataFrame(geometry=polygons.representative_point(), crs=local_crs)
+        inside = face_points.sjoin(gdf_to_split[["geometry"]], how="inner", predicate="within")
+        polygons = polygons.loc[inside.index.unique()].copy()
+    else:
+        polygons = polygons.clip(gdf_to_split, keep_geom_type=True).explode()
 
     polygons_points = polygons.copy()
     polygons_points.geometry = polygons.representative_point()

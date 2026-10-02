@@ -1,13 +1,13 @@
 import geopandas as gpd
 import pandas as pd
+from shapely.ops import nearest_points, unary_union
 
-from shapely.ops import unary_union, nearest_points
-
+from genplanner import config
 from genplanner.errors import (
+    FixPointsOutsideTerritoryError,
+    GenPlannerArgumentError,
     GenPlannerInitError,
     RelationMatrixError,
-    GenPlannerArgumentError,
-    FixPointsOutsideTerritoryError,
 )
 from genplanner.utils import (
     explode_linestring,
@@ -15,10 +15,9 @@ from genplanner.utils import (
     geom2multilinestring,
     territory_splitter,
 )
-from genplanner.zones import FunctionalZone
-from genplanner import config
 from genplanner.zone_relations.forbidden_terr_kind import FORBIDDEN_NEIGHBORHOOD
 from genplanner.zone_relations.relation_matrix import ZoneRelationMatrix
+from genplanner.zones import FunctionalZone
 
 logger = config.logger
 
@@ -34,6 +33,10 @@ def cut_out_features(
         raise GenPlannerInitError(
             f"CRS mismatch between features_gdf({features_gdf.crs}) and exclude_gdf({exclude_gdf.crs})."
         )
+    # Repeated source features otherwise get buffered and unioned
+    # separately, even though they describe the same excluded area.
+    exclude_key = exclude_gdf.geometry.normalize().to_wkb()
+    exclude_gdf = exclude_gdf.loc[~exclude_key.duplicated()].copy()
     exclude_gdf = exclude_gdf.clip(features_gdf.total_bounds, keep_geom_type=True)
     exclude_gdf.geometry = exclude_gdf.geometry.buffer(exclude_buffer, resolution=2)
     exclude_gdf = gpd.GeoDataFrame(geometry=[exclude_gdf.union_all()], crs=exclude_gdf.crs)
@@ -48,9 +51,18 @@ def cut_by_roads(
             f"CRS mismatch between features_gdf({features_gdf.crs}) and roads_gdf({roads_gdf.crs})."
         )
     roads_gdf = roads_gdf.explode(ignore_index=True)
+    # Keep the widest road when geometrically identical records disagree on
+    # width.  Deduplicate the output roads as well as the splitting lines.
+    if "roads_width" in roads_gdf.columns:
+        road_width_order = pd.to_numeric(roads_gdf["roads_width"], errors="coerce")
+        roads_gdf = roads_gdf.assign(_road_width_order=road_width_order).sort_values(
+            "_road_width_order", ascending=False, na_position="last"
+        )
+    road_key = roads_gdf.geometry.normalize().to_wkb()
+    roads_gdf = roads_gdf.loc[~road_key.duplicated()].drop(columns=["_road_width_order"], errors="ignore")
+    roads_gdf = roads_gdf.reset_index(drop=True)
     splitters_roads = roads_gdf.copy()
     splitters_roads.geometry = splitters_roads.geometry.normalize()
-    splitters_roads = splitters_roads[~splitters_roads.geometry.duplicated(keep="first")]
     splitters_roads.geometry = splitters_roads.geometry.apply(extend_linestring, distance=roads_extend_distance)
     features_gdf = territory_splitter(features_gdf, splitters_roads, return_splitters=False).reset_index(drop=True)
 
@@ -60,7 +72,7 @@ def cut_by_roads(
         ).explode(ignore_index=True),
         crs=features_gdf.crs,
     )
-    splitters_centroids.geometry = splitters_centroids.geometry.centroid.buffer(0.1, resolution=1)
+    splitters_centroids.geometry = splitters_centroids.geometry.centroid.buffer(0.1, quad_segs=1)
     roads_gdf["new_geometry"] = roads_gdf.geometry.apply(geom2multilinestring).explode().apply(explode_linestring)
     roads_gdf = roads_gdf.explode(column="new_geometry", ignore_index=True)
     roads_gdf["geometry"] = roads_gdf["new_geometry"]
