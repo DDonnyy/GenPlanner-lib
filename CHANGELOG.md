@@ -2,6 +2,17 @@
 
 <!-- version list -->
 
+## v1.0.6 (2026-10-08)
+
+### Performance Improvements
+
+- Speed up Voronoi generation and expand regression tests
+  ([`d09c432`](https://github.com/DDonnyy/GenPlanner-lib/commit/d09c4327eb03b0b0a55eb570a1acbc8ba81de02d))
+
+Reuse native buffers and reduce Python geometry overhead while preserving seeded output. Add
+  regression coverage and profiling scripts.
+
+
 ## v1.0.5 (2026-10-02)
 
 ### Bug Fixes

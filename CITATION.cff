@@ -6,7 +6,7 @@ authors:
   - family-names: "Oleynikov"
     given-names: "Danila"
     orcid: "https://orcid.org/0009-0002-7881-1543"
-version: "1.0.5"
+version: "1.0.6"
 repository-code: "https://github.com/DDonnyy/GenPlanner-lib"
 url: "https://ddonnyy.github.io/GenPlanner-lib/"
 keywords:
