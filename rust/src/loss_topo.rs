@@ -1,7 +1,7 @@
-use std::collections::HashSet;
 use crate::voronoi2::VoronoiInfo;
 use candle_core::{Result, Tensor};
 use nalgebra::Vector2;
+use std::collections::HashSet;
 
 fn topology(
     voronoi_info: &VoronoiInfo,
@@ -295,18 +295,8 @@ pub fn compute_group_fix_loss(
 pub fn edge2vtvx_forbidden_wall(
     voronoi_info: &VoronoiInfo,
     point2zone: &[usize],
-    zone_forbidden: &Vec<(usize, usize)>,
+    forbidden_pairs: &HashSet<(usize, usize)>,
 ) -> Vec<usize> {
-    // forbidden pairs as (min,max)
-    let mut forb = HashSet::<(usize, usize)>::new();
-    for &(a, b) in zone_forbidden.iter() {
-        if a == usize::MAX || b == usize::MAX || a == b {
-            continue;
-        }
-        let (x, y) = if a < b { (a, b) } else { (b, a) };
-        forb.insert((x, y));
-    }
-
     let point2cell_idx = &voronoi_info.point2cell_idx;
     let idx2vtxv = &voronoi_info.cell_idx2vertex_idx;
 
@@ -340,7 +330,7 @@ pub fn edge2vtvx_forbidden_wall(
             }
 
             let (a, b) = if zi < zj { (zi, zj) } else { (zj, zi) };
-            if !forb.contains(&(a, b)) {
+            if !forbidden_pairs.contains(&(a, b)) {
                 continue;
             }
 

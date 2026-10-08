@@ -3,13 +3,15 @@
 
 //! methods for 2D Voronoi diagram
 
-use anyhow::{bail, ensure, Result};
+use anyhow::{ensure, Result};
 
 #[derive(Clone)]
 pub struct Cell {
     pub vtx2xy: Vec<f32>,
     pub vtx2info: Vec<[usize; 4]>,
 }
+
+type Intersection = (f32, usize, [f32; 2], [usize; 4]);
 
 impl Cell {
     fn is_inside(&self, p: &[f32; 2]) -> bool {
@@ -38,10 +40,23 @@ impl Cell {
     }
 }
 
+#[inline]
+fn shared_site(info0: &[usize; 4], info1: &[usize; 4]) -> Result<Option<usize>> {
+    let mut shared = None;
+    for k in [info0[2], info0[3]] {
+        if k == usize::MAX || (k != info1[2] && k != info1[3]) || shared == Some(k) {
+            continue;
+        }
+        ensure!(shared.is_none(), "Ambiguous Voronoi intersection topology");
+        shared = Some(k);
+    }
+    Ok(shared)
+}
+
 fn hoge(
     vtx2xy: &[f32],
     vtx2info: &[[usize; 4]],
-    vtxnews: &[(f32, usize, [f32; 2], [usize; 4])],
+    vtxnews: &[Intersection],
     vtx2vtxnew: &[usize],
     vtxnew2isvisisted: &mut [bool],
 ) -> Result<Option<Cell>> {
@@ -57,10 +72,16 @@ fn hoge(
     let mut steps = 0;
     loop {
         steps += 1;
-        ensure!(steps <= (num_vtx + vtxnews.len()) * 4, "Voronoi cell traversal did not close");
+        ensure!(
+            steps <= (num_vtx + vtxnews.len()) * 4,
+            "Voronoi cell traversal did not close"
+        );
         // dbg!(i_vtx, is_new, is_entry, i_vtx0, is_new0);
         if is_new {
-            ensure!(i_vtx < vtxnews.len(), "Voronoi intersection index out of range");
+            ensure!(
+                i_vtx < vtxnews.len(),
+                "Voronoi intersection index out of range"
+            );
             vtx2xy_new.push(vtxnews[i_vtx].2[0]);
             vtx2xy_new.push(vtxnews[i_vtx].2[1]);
             vtx2info_new.push(vtxnews[i_vtx].3);
@@ -103,20 +124,22 @@ fn hoge(
 
 /// vtx2xy should be counter-clockwise
 pub fn cut_polygon_by_line(
-    cell: &Cell,
+    cell: Cell,
     line_s: &[f32; 2],
     line_n: &[f32; 2],
     i_vtx: usize,
     j_vtx: usize,
-) -> Result<Vec<Cell>> {
+    output: &mut Vec<Cell>,
+    vtxnews: &mut Vec<Intersection>,
+) -> Result<()> {
     use del_geo_core::vec2::Vec2;
     // negative->inside
     let depth = |p: &[f32; 2]| p.sub(line_s).dot(line_n);
     let num_vtx = cell.vtx2xy.len() / 2;
-    let (vtxnews, is_inside) = {
+    vtxnews.clear();
+    let is_inside = {
         let line_t = del_geo_core::vec2::rotate90(line_n);
         let mut is_inside = false;
-        let mut vtxnews: Vec<(f32, usize, [f32; 2], [usize; 4])> = vec![];
         for i0_vtx in 0..num_vtx {
             let i1_vtx = (i0_vtx + 1) % num_vtx;
             let p0 = del_msh_core::vtx2xy::to_vec2(&cell.vtx2xy, i0_vtx);
@@ -126,8 +149,14 @@ pub fn cut_polygon_by_line(
                 is_inside = true;
             }
             let d1 = depth(p1);
-            ensure!(d0.is_finite() && d1.is_finite(), "Non-finite Voronoi line distance");
-            ensure!(d0 != 0. && d1 != 0., "Voronoi bisector passes through a polygon vertex");
+            ensure!(
+                d0.is_finite() && d1.is_finite(),
+                "Non-finite Voronoi line distance"
+            );
+            ensure!(
+                d0 != 0. && d1 != 0.,
+                "Voronoi bisector passes through a polygon vertex"
+            );
             if (d0 > 0. && d1 > 0.) || (d0 < 0. && d1 < 0.) {
                 continue;
             }
@@ -137,43 +166,40 @@ pub fn cut_polygon_by_line(
             //
             let info0 = cell.vtx2info[i0_vtx];
             let info1 = cell.vtx2info[i1_vtx];
-            let set_a = std::collections::BTreeSet::from_iter([info0[2], info0[3]]);
-            let set_b = std::collections::BTreeSet::from_iter([info1[2], info1[3]]);
-            let mut intersec = &set_a & &set_b;
-            intersec.remove(&usize::MAX);
-            let info = if intersec.is_empty() {
-                [info0[0], i_vtx, j_vtx, usize::MAX]
-            } else if intersec.len() == 1 {
-                let k_vtx = intersec.first().unwrap();
-                [usize::MAX, i_vtx, *k_vtx, j_vtx]
+            let info = if let Some(k_vtx) = shared_site(&info0, &info1)? {
+                [usize::MAX, i_vtx, k_vtx, j_vtx]
             } else {
-                bail!("Ambiguous Voronoi intersection topology");
+                [info0[0], i_vtx, j_vtx, usize::MAX]
             };
             //
             vtxnews.push((-t0, i0_vtx, pm, info));
         }
         vtxnews.sort_by(|a, b| a.0.total_cmp(&b.0));
-        (vtxnews, is_inside)
+        is_inside
     };
     if vtxnews.is_empty() {
         // no intersection
-        return Ok(if is_inside {
-            vec![cell.clone()]
-        } else {
-            vec![]
-        });
+        if is_inside {
+            output.push(cell);
+        }
+        return Ok(());
     }
-    ensure!(vtxnews.len() % 2 == 0, "Odd number of Voronoi intersections");
+    ensure!(
+        vtxnews.len() % 2 == 0,
+        "Odd number of Voronoi intersections"
+    );
     let vtx2vtxnew = {
         let mut vtx2vtxnew = vec![usize::MAX; num_vtx];
         for (i_vtxnew, vtxnew) in vtxnews.iter().enumerate() {
-            ensure!(vtx2vtxnew[vtxnew.1] == usize::MAX, "Repeated Voronoi intersection on one edge");
+            ensure!(
+                vtx2vtxnew[vtxnew.1] == usize::MAX,
+                "Repeated Voronoi intersection on one edge"
+            );
             vtx2vtxnew[vtxnew.1] = i_vtxnew;
         }
         vtx2vtxnew
     };
     let mut vtxnew2isvisisted = vec![false; vtxnews.len()];
-    let mut cells: Vec<Cell> = vec![];
     loop {
         let c0 = hoge(
             &cell.vtx2xy,
@@ -185,9 +211,9 @@ pub fn cut_polygon_by_line(
         let Some(cell) = c0 else {
             break;
         };
-        cells.push(cell);
+        output.push(cell);
     }
-    Ok(cells)
+    Ok(())
 }
 
 pub fn voronoi_cells<F>(vtxl2xy: &[f32], site2xy: &[f32], site2isalive: F) -> Result<Vec<Cell>>
@@ -195,9 +221,15 @@ where
     F: Fn(usize) -> bool,
 {
     use del_geo_core::vec2::Vec2;
-    ensure!(vtxl2xy.len() >= 6 && vtxl2xy.len() % 2 == 0, "Invalid Voronoi boundary");
+    ensure!(
+        vtxl2xy.len() >= 6 && vtxl2xy.len() % 2 == 0,
+        "Invalid Voronoi boundary"
+    );
     ensure!(site2xy.len() % 2 == 0, "Invalid Voronoi site coordinates");
-    ensure!(vtxl2xy.iter().chain(site2xy).all(|v| v.is_finite()), "Non-finite Voronoi input");
+    ensure!(
+        vtxl2xy.iter().chain(site2xy).all(|v| v.is_finite()),
+        "Non-finite Voronoi input"
+    );
     let num_site = site2xy.len() / 2;
     let mut site2cell = vec![Cell::new_empty(); num_site];
     for (i_site, pos_i) in site2xy.chunks(2).enumerate() {
@@ -206,6 +238,8 @@ where
             continue;
         }
         let mut cell_stack = vec![Cell::new_from_polyloop2(vtxl2xy)];
+        let mut cell_stack_new = Vec::new();
+        let mut intersections = Vec::new();
         for (j_site, pos_j) in site2xy.chunks(2).enumerate() {
             let pos_j = arrayref::array_ref![pos_j, 0, 2];
             if !site2isalive(j_site) {
@@ -215,22 +249,31 @@ where
                 continue;
             }
             let delta = pos_j.sub(pos_i);
-            ensure!(delta.dot(&delta) > 1.0e-14, "Coincident Voronoi sites {i_site} and {j_site}");
+            ensure!(
+                delta.dot(&delta) > 1.0e-14,
+                "Coincident Voronoi sites {i_site} and {j_site}"
+            );
             let line_s = pos_i.add(pos_j).scale(0.5);
             let line_n = delta.normalize();
-            let mut cell_stack_new = vec![];
-            for cell_in in cell_stack {
-                let cells = cut_polygon_by_line(&cell_in, &line_s, &line_n, i_site, j_site)?;
-                cell_stack_new.extend(cells);
+            for cell_in in cell_stack.drain(..) {
+                cut_polygon_by_line(
+                    cell_in,
+                    &line_s,
+                    &line_n,
+                    i_site,
+                    j_site,
+                    &mut cell_stack_new,
+                    &mut intersections,
+                )?;
             }
-            cell_stack = cell_stack_new;
+            std::mem::swap(&mut cell_stack, &mut cell_stack_new);
         }
         if cell_stack.is_empty() {
             site2cell[i_site] = Cell::new_empty();
             continue;
         }
         if cell_stack.len() == 1 {
-            site2cell[i_site] = cell_stack[0].clone();
+            site2cell[i_site] = cell_stack.pop().unwrap();
             continue;
         }
         let mut depthcell: Vec<(f32, usize)> = vec![];
@@ -243,7 +286,7 @@ where
         depthcell.sort_by(|a, b| a.0.total_cmp(&b.0));
         let i_cell = depthcell[0].1;
         assert!(!cell_stack[i_cell].vtx2xy.is_empty());
-        site2cell[i_site] = cell_stack[i_cell].clone();
+        site2cell[i_site] = cell_stack.swap_remove(i_cell);
     }
     Ok(site2cell)
 }
@@ -251,8 +294,6 @@ where
 pub struct VoronoiMesh {
     pub site2idx: Vec<usize>,
     pub idx2vtxv: Vec<usize>,
-    #[allow(dead_code)]
-    pub vtxv2xy: Vec<[f32; 2]>,
     pub vtxv2info: Vec<[usize; 4]>,
 }
 
@@ -263,30 +304,25 @@ pub fn indexing(site2cell: &[Cell]) -> VoronoiMesh {
         tmp.sort();
         [info[0], tmp[0], tmp[1], tmp[2]]
     };
-    let mut info2vtxv = std::collections::BTreeMap::<[usize; 4], usize>::new();
+    let mut info2vtxv = std::collections::HashMap::<[usize; 4], usize>::new();
     let mut vtxv2info: Vec<[usize; 4]> = vec![];
     for cell in site2cell.iter() {
         for info in &cell.vtx2info {
             let info0 = sort_info(info);
-            if !info2vtxv.contains_key(&info0) {
-                let i_vtxc = info2vtxv.len();
-                info2vtxv.insert(info0, i_vtxc);
+            let i_vtxc = info2vtxv.len();
+            if let std::collections::hash_map::Entry::Vacant(entry) = info2vtxv.entry(info0) {
+                entry.insert(i_vtxc);
                 vtxv2info.push(info0);
             }
         }
     }
-    let info2vtxv = info2vtxv;
-    let vtxv2info = vtxv2info;
-    let num_vtxv = info2vtxv.len();
-    let mut vtxv2xy = vec![[0f32; 2]; num_vtxv];
     let mut site2idx = vec![0; 1];
     let mut idx2vtxc = vec![0usize; 0];
     for cell in site2cell.iter() {
-        for (ind, info) in cell.vtx2info.iter().enumerate() {
+        for info in &cell.vtx2info {
             let info0 = sort_info(info);
             let i_vtxv = info2vtxv.get(&info0).unwrap();
             idx2vtxc.push(*i_vtxv);
-            vtxv2xy[*i_vtxv] = *del_msh_core::vtx2xy::to_vec2(&cell.vtx2xy, ind);
         }
         site2idx.push(idx2vtxc.len());
     }
@@ -294,7 +330,6 @@ pub fn indexing(site2cell: &[Cell]) -> VoronoiMesh {
     VoronoiMesh {
         site2idx,
         idx2vtxv: idx2vtxc,
-        vtxv2xy,
         vtxv2info,
     }
 }
@@ -333,7 +368,34 @@ pub fn position_of_voronoi_vertex(info: &[usize; 4], vtxl2xy: &[f32], site2xy: &
 
 #[cfg(test)]
 mod tests {
-    use super::{hoge, voronoi_cells};
+    use super::{hoge, shared_site, voronoi_cells};
+
+    #[test]
+    fn shared_site_matches_set_intersection_for_duplicate_and_missing_indices() {
+        use std::collections::BTreeSet;
+
+        for a in [0, 1, 2, usize::MAX] {
+            for b in [0, 1, 2, usize::MAX] {
+                for c in [0, 1, 2, usize::MAX] {
+                    for d in [0, 1, 2, usize::MAX] {
+                        let set_a = BTreeSet::from([a, b]);
+                        let set_b = BTreeSet::from([c, d]);
+                        let expected: Vec<_> = set_a
+                            .intersection(&set_b)
+                            .copied()
+                            .filter(|&index| index != usize::MAX)
+                            .collect();
+                        let result = shared_site(&[0, 0, a, b], &[0, 0, c, d]);
+                        if expected.len() > 1 {
+                            assert!(result.is_err());
+                        } else {
+                            assert_eq!(result.unwrap(), expected.first().copied());
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn ordinary_two_site_split_succeeds() {
@@ -364,10 +426,7 @@ mod tests {
     fn traversal_at_zero_wraps_to_last_intersection() {
         let boundary = [0., 0., 1., 0., 1., 1., 0., 1.];
         let info = [[0, usize::MAX, usize::MAX, usize::MAX]; 4];
-        let crossings = [
-            (0., 0, [0.5, 0.], info[0]),
-            (1., 2, [0.5, 1.], info[2]),
-        ];
+        let crossings = [(0., 0, [0.5, 0.], info[0]), (1., 2, [0.5, 1.], info[2])];
         let mapping = [0, usize::MAX, 1, usize::MAX];
         let mut visited = [true, false];
         let cell = hoge(&boundary, &info, &crossings, &mapping, &mut visited)

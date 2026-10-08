@@ -12,6 +12,7 @@ use std::panic;
 
 use crate::loss_topo::edge2vtvx_forbidden_wall;
 use candle_core::{DType, Tensor};
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 
@@ -115,8 +116,7 @@ pub fn edge2vtvx_wall(voronoi_info: &VoronoiInfo, point2zone: &[usize]) -> Vec<u
 }
 
 pub fn zone2area(
-    point2zone: &[usize],
-    num_zones: usize,
+    sum_sites_for_rooms: &Tensor,
     point2cell_idx: &[usize],
     idx2vtxv: &[usize],
     voronoi_vertices_xy: &candle_core::Tensor,
@@ -127,24 +127,6 @@ pub fn zone2area(
     };
     let site2areas = voronoi_vertices_xy.apply_op1(polygonmesh2_to_areas)?;
     let site2areas = site2areas.reshape((site2areas.dim(0).unwrap(), 1))?;
-
-    let num_site = point2zone.len();
-    let sum_sites_for_rooms = {
-        let mut sum_sites_for_rooms = vec![0f32; num_site * num_zones];
-        for i_site in 0..num_site {
-            let i_zone = point2zone[i_site];
-            if i_zone == usize::MAX {
-                continue;
-            }
-            assert!(i_zone < num_zones);
-            sum_sites_for_rooms[i_zone * num_site + i_site] = 1f32;
-        }
-        candle_core::Tensor::from_slice(
-            &sum_sites_for_rooms,
-            candle_core::Shape::from_dims(&[num_zones, num_site]),
-            &candle_core::Device::Cpu,
-        )?
-    };
     sum_sites_for_rooms.matmul(&site2areas)
 }
 
@@ -169,7 +151,37 @@ pub fn optimize_zoning(
     max_iterations: usize,
 ) -> anyhow::Result<(Vec<f32>, Vec<Vec<f32>>)> {
     anyhow::ensure!(max_iterations > 0, "max_iterations must be positive");
+    anyhow::ensure!(
+        generator_points_xy.len() == point2zone.len() * 2,
+        "generator_points_xy must contain two coordinates per point2zone entry"
+    );
+    anyhow::ensure!(
+        point_fixed_mask.len() == generator_points_xy.len(),
+        "point_fixed_mask must contain two flags per site"
+    );
+    anyhow::ensure!(
+        !zone_target_area.is_empty(),
+        "zone_target_area must contain at least one zone"
+    );
+    for (i_site, &zone_idx) in point2zone.iter().enumerate() {
+        anyhow::ensure!(
+            zone_idx == usize::MAX || zone_idx < zone_target_area.len(),
+            "point2zone[{i_site}] contains invalid zone index {zone_idx}"
+        );
+        anyhow::ensure!(
+            zone_idx != usize::MAX
+                || point_fixed_mask[2 * i_site] == 0.0 && point_fixed_mask[2 * i_site + 1] == 0.0,
+            "fixed site {i_site} has no zone"
+        );
+    }
+    for (i_pair, &(a, b)) in zone_neighbors.iter().enumerate() {
+        anyhow::ensure!(
+            a < zone_target_area.len() && b < zone_target_area.len(),
+            "zone_neighbors[{i_pair}] contains an invalid zone index"
+        );
+    }
     let fixed_flags = point_fixed_mask.iter().filter(|&&x| x != 0.0).count();
+    let has_fixed_sites = fixed_flags > 0;
 
     let num_zones = zone_target_area.len();
     let num_sites = point2zone.len();
@@ -235,6 +247,30 @@ pub fn optimize_zoning(
         .unwrap()
     };
 
+    let mut zone_site_mask = vec![0f32; num_sites * num_zones];
+    for (i_site, &i_zone) in point2zone.iter().enumerate() {
+        if i_zone == usize::MAX {
+            continue;
+        }
+        zone_site_mask[i_zone * num_sites + i_site] = 1f32;
+    }
+    let sum_sites_for_rooms = Tensor::from_slice(
+        &zone_site_mask,
+        candle_core::Shape::from_dims(&[num_zones, num_sites]),
+        &candle_core::Device::Cpu,
+    )?;
+    let total_area_trg = Tensor::from_vec(
+        vec![del_msh_core::polyloop2::area(&boundary_xy)],
+        candle_core::Shape::from_dims(&[]),
+        &candle_core::Device::Cpu,
+    )?;
+    let zero_loss = Tensor::zeros((), DType::F32, &candle_core::Device::Cpu)?;
+    let forbidden_pairs: HashSet<(usize, usize)> = zone_forbidden
+        .iter()
+        .filter(|&&(a, b)| a != usize::MAX && b != usize::MAX && a != b)
+        .map(|&(a, b)| if a < b { (a, b) } else { (b, a) })
+        .collect();
+
     let adamw_params = candle_nn::ParamsAdamW {
         lr: 0.2,
         ..Default::default()
@@ -245,8 +281,7 @@ pub fn optimize_zoning(
 
     let n_sites = point2zone.len();
     let base_iterations = 1000;
-    let mut num_iterations =
-        base_iterations + ((n_sites.saturating_sub(10) * 1000) / 50);
+    let mut num_iterations = base_iterations + ((n_sites.saturating_sub(10) * 1000) / 50);
 
     if fixed_flags > 0 {
         num_iterations = (num_iterations as f32 * 1.1).round() as usize;
@@ -281,21 +316,22 @@ pub fn optimize_zoning(
 
         let loss_walllen = {
             let vtx2xyz_to_edgevector = vtx2xyz_to_edgevector::Layer {
-                edge2vtx: Vec::<usize>::from(edge2vtxv_wall.clone()),
+                edge2vtx: edge2vtxv_wall,
             };
             let edge2xy = voronoi_vertices_xy.apply_op1(vtx2xyz_to_edgevector)?;
             edge2xy.abs()?.sum_all()?
         };
 
-        let edge2vtxv_forbidden =
-            edge2vtvx_forbidden_wall(&voronoi_info, &point2zone, &zone_forbidden);
-
-        let loss_forbidden_walllen = {
+        let loss_forbidden_walllen = if forbidden_pairs.is_empty() {
+            zero_loss.clone()
+        } else {
+            let edge2vtxv_forbidden =
+                edge2vtvx_forbidden_wall(&voronoi_info, &point2zone, &forbidden_pairs);
             if edge2vtxv_forbidden.is_empty() {
-                Tensor::zeros((), DType::F32, generator_points_xy.device())?
+                zero_loss.clone()
             } else {
                 let op = vtx2xyz_to_edgevector::Layer {
-                    edge2vtx: edge2vtxv_forbidden.clone(),
+                    edge2vtx: edge2vtxv_forbidden,
                 };
                 let edge2xy = voronoi_vertices_xy.apply_op1(op)?;
                 // edge2xy.abs()?.sum_all()?
@@ -305,8 +341,7 @@ pub fn optimize_zoning(
 
         let (loss_each_area, loss_total_area) = {
             let zone2area = zone2area(
-                &point2zone,
-                zone_target_area.dims2()?.0,
+                &sum_sites_for_rooms,
                 &voronoi_info.point2cell_idx,
                 &voronoi_info.cell_idx2vertex_idx,
                 &voronoi_vertices_xy,
@@ -319,15 +354,9 @@ pub fn optimize_zoning(
                     println!("    room:{} area:{}", i_zone, zone2area[i_zone]/total_area);
                 }
             }
-             */
+            */
             let loss_each_area = zone2area.sub(&zone_target_area)?.sqr()?.sum_all()?;
-            let total_area_trg = del_msh_core::polyloop2::area(&boundary_xy);
-            let total_area_trg = candle_core::Tensor::from_vec(
-                vec![total_area_trg],
-                candle_core::Shape::from_dims(&[]),
-                &candle_core::Device::Cpu,
-            )?;
-            let loss_total_area = (zone2area.sum_all()? - total_area_trg)?.abs()?;
+            let loss_total_area = (zone2area.sum_all()? - &total_area_trg)?.abs()?;
             (loss_each_area, loss_total_area)
         };
         // println!("  loss each_area {}", loss_each_area.to_vec0::<f32>()?);
@@ -341,21 +370,29 @@ pub fn optimize_zoning(
             &zone_neighbors,
         )?;
 
-        let loss_group_fix = loss_topo::compute_group_fix_loss(
-            &generator_points_xy,
-            &zone_fixed_points,
-            &point2zone,
-        )?;
+        let loss_group_fix = if has_fixed_sites {
+            loss_topo::compute_group_fix_loss(
+                &generator_points_xy,
+                &zone_fixed_points,
+                &point2zone,
+            )?
+        } else {
+            zero_loss.clone()
+        };
         // println!("  loss topo: {}", loss_topo.to_vec0::<f32>()?);
         // let loss_fix = generator_points_xy.sub(&generator_points_xy_ini)?.mul(&point_fixed_mask)?.sum_all()?;
         // let loss_fix = generator_points_xy.sub(&generator_points_xy_ini)?.mul(&point_fixed_mask)?.sum_all()?;
 
-        let loss_fix = generator_points_xy
-            .sub(&generator_points_xy_ini)?
-            .mul(&point_fixed_mask)?
-            .sqr()?
-            .sqr()?
-            .sum_all()?;
+        let loss_fix = if has_fixed_sites {
+            generator_points_xy
+                .sub(&generator_points_xy_ini)?
+                .mul(&point_fixed_mask)?
+                .sqr()?
+                .sqr()?
+                .sum_all()?
+        } else {
+            zero_loss.clone()
+        };
 
         let loss_lloyd = voronoi2::loss_lloyd(
             &voronoi_info.point2cell_idx,

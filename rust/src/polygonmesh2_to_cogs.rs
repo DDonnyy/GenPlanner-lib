@@ -51,7 +51,8 @@ impl candle_core::CustomOp1 for Layer {
         //
         let mut dw_vtx2xy = vec![0f32; num_vtx * 2];
         for i_elem in 0..self.cell_elem2polygon_idx.len() - 1 {
-            let num_vtx_in_elem = self.cell_elem2polygon_idx[i_elem + 1] - self.cell_elem2polygon_idx[i_elem];
+            let num_vtx_in_elem =
+                self.cell_elem2polygon_idx[i_elem + 1] - self.cell_elem2polygon_idx[i_elem];
             let ratio = if num_vtx_in_elem == 0 {
                 0.0
             } else {

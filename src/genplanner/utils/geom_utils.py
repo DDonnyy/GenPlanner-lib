@@ -8,6 +8,7 @@ from scipy.stats.qmc import PoissonDisk
 from shapely import LineString, MultiLineString, MultiPolygon, Point, Polygon
 from shapely.coords import CoordinateSequence
 from shapely.ops import polygonize, unary_union
+from shapely.strtree import STRtree
 
 
 def rotate_poly(poly: Polygon | MultiPolygon, pivot_point, angle_rad) -> Polygon | MultiPolygon:
@@ -17,14 +18,19 @@ def rotate_poly(poly: Polygon | MultiPolygon, pivot_point, angle_rad) -> Polygon
 
 
 def elastic_wrap(gdf: gpd.GeoDataFrame) -> Polygon:
-    gdf = gdf.copy()
     multip = gpd.GeoDataFrame(geometry=[gdf.union_all()], crs=gdf.crs).explode(ignore_index=True)
-    max_dist = (
-        np.ceil(multip.apply(lambda row: multip.drop(row.name).distance(row.geometry).min(), axis=1).max(axis=0)) + 0.1
-    ) * 1.1
-    if pd.isna(max_dist):
+    if len(multip) < 2:
         max_dist = 1
-    poly = multip.buffer(max_dist + 1, resolution=2).union_all().buffer(-max_dist, resolution=2)
+    else:
+        # The union has distinct components. Query each component's nearest
+        # *other* component without building a quadratic distance matrix.
+        geometries = multip.geometry.to_numpy()
+        _, distances = STRtree(geometries).query_nearest(
+            geometries, exclusive=True, all_matches=False, return_distance=True
+        )
+        largest_gap = distances.max() if len(distances) else float("nan")
+        max_dist = (np.ceil(largest_gap) + 0.1) * 1.1 if np.isfinite(largest_gap) else 1
+    poly = multip.buffer(max_dist + 1, quad_segs=2).union_all().buffer(-max_dist, quad_segs=2)
     if isinstance(poly, MultiPolygon):
         return elastic_wrap(gpd.GeoDataFrame(geometry=[poly], crs=gdf.crs))
     poly = Polygon(poly.exterior)
@@ -33,13 +39,15 @@ def elastic_wrap(gdf: gpd.GeoDataFrame) -> Polygon:
 
 def rotate_coords(coords: CoordinateSequence | ndarray, pivot: Point, angle_rad: float) -> list[tuple[float, float]]:
     px, py = pivot.x, pivot.y
+    cos_angle = math.cos(angle_rad)
+    sin_angle = math.sin(angle_rad)
     rotated_coords = []
     for x, y in coords:
         translated_x = x - px
         translated_y = y - py
 
-        rotated_x = translated_x * math.cos(angle_rad) - translated_y * math.sin(angle_rad)
-        rotated_y = translated_x * math.sin(angle_rad) + translated_y * math.cos(angle_rad)
+        rotated_x = translated_x * cos_angle - translated_y * sin_angle
+        rotated_y = translated_x * sin_angle + translated_y * cos_angle
 
         final_x = rotated_x + px
         final_y = rotated_y + py
@@ -130,10 +138,11 @@ def territory_splitter(
     return_splitters=False,
     reproject_attr=False,
     select_by_point=False,
+    working_crs=None,
 ) -> gpd.GeoDataFrame:
 
     original_crs = gdf_to_split.crs
-    local_crs = gdf_to_split.estimate_utm_crs()
+    local_crs = working_crs if working_crs is not None else gdf_to_split.estimate_utm_crs()
     gdf_to_split = gdf_to_split.to_crs(local_crs)
     if isinstance(splitters, list):
         splitters = pd.concat(splitters, ignore_index=True)
