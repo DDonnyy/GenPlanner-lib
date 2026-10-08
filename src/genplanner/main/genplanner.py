@@ -64,6 +64,7 @@ class GenPlanner:
         run_name=None,
         max_run_seconds: float | None = 900,
         max_optimization_iterations: int = 2000,
+        seed: int | None = None,
     ):
         """
         Initialize a territory zoning pipeline.
@@ -136,6 +137,8 @@ class GenPlanner:
                 with the completed task count when exceeded.
             max_optimization_iterations:
                 Maximum iterations for each Rust Voronoi optimization attempt.
+            seed:
+                Optional seed for reproducible Voronoi site placement.
 
         Raises:
             GenPlannerInitError:
@@ -160,8 +163,11 @@ class GenPlanner:
             or max_optimization_iterations < 1
         ):
             raise ValueError("max_optimization_iterations must be a positive integer")
+        if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
+            raise ValueError("seed must be an integer or None")
         self.max_run_seconds = max_run_seconds
         self.max_optimization_iterations = max_optimization_iterations
+        self.seed = seed
         self.existing_terr_zones = gpd.GeoDataFrame()
         self.static_fix_points = gpd.GeoDataFrame()
         self.territory_to_work_with = gpd.GeoDataFrame()
@@ -236,7 +242,7 @@ class GenPlanner:
             features_gdf, roads_gdf = cut_by_roads(features_gdf, roads_gdf, roads_extend_distance)
             self.user_roads = roads_gdf
         else:
-            self.user_roads = gpd.GeoDataFrame()
+            self.user_roads = gpd.GeoDataFrame(geometry=[], crs=self.local_crs)
 
         if len(existing_terr_zones) > 0:
             existing_terr_zones = existing_terr_zones.to_crs(self.local_crs)
@@ -263,6 +269,7 @@ class GenPlanner:
                 "run_name": run_name,
                 "max_optimization_iterations": self.max_optimization_iterations,
                 "deadline": deadline,
+                "seed": self.seed,
             }
         )
         if self.rust_write_logs:
@@ -283,12 +290,14 @@ class GenPlanner:
         if complete_zones.geometry.isna().any() or complete_zones.geometry.is_empty.any():
             raise ValueError("Generated zones contain missing or empty geometries")
 
-        roads_poly = generated_roads.copy()
-        roads_poly.geometry = roads_poly.apply(lambda x: x.geometry.buffer(x.roads_width / 2, resolution=4), axis=1)
-
-        complete_zones = territory_splitter(
-            complete_zones, roads_poly, reproject_attr=True, select_by_point=True
-        ).reset_index(drop=True)
+        if len(generated_roads) > 0:
+            roads_poly = generated_roads.copy()
+            roads_poly.geometry = roads_poly.geometry.buffer(roads_poly.roads_width / 2, quad_segs=4)
+            complete_zones = territory_splitter(
+                complete_zones, roads_poly, reproject_attr=True, select_by_point=True, working_crs=self.local_crs
+            ).reset_index(drop=True)
+        else:
+            complete_zones = complete_zones.reset_index(drop=True)
 
         return complete_zones.to_crs(self.original_crs), generated_roads.to_crs(self.original_crs)
 
@@ -521,7 +530,7 @@ class GenPlanner:
 
 def _merge_gdfs(gdfs: list[gpd.GeoDataFrame], local_crs):
     if not gdfs:
-        return gpd.GeoDataFrame()
+        return gpd.GeoDataFrame(geometry=[], crs=local_crs)
     return gpd.GeoDataFrame(pd.concat(gdfs, ignore_index=True), crs=local_crs, geometry="geometry")
 
 
@@ -545,7 +554,6 @@ def split_queue(
         while True:
             check_deadline()
             try:
-                time.sleep(0.001)
                 func, task, kwargs = task_queue.get_nowait()
             except queue.Empty:
                 break
@@ -572,31 +580,39 @@ def split_queue(
 
     workers = int(max_workers or multiprocessing.cpu_count())
 
-    future_to_nothing: dict[concurrent.futures.Future, None] = {}
+    future_to_path: dict[concurrent.futures.Future, tuple[int, ...]] = {}
+    ordered_zones: list[tuple[tuple[int, ...], gpd.GeoDataFrame]] = []
+    ordered_roads: list[tuple[tuple[int, ...], gpd.GeoDataFrame]] = []
+    root_task_index = 0
 
     with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
         while True:
             check_deadline()
-            while len(future_to_nothing) < workers:
+            while len(future_to_path) < workers:
                 check_deadline()
                 try:
-                    time.sleep(0.001)
-                    func, task, kwargs = task_queue.get_nowait()
+                    queued = task_queue.get_nowait()
                 except queue.Empty:
                     break
+                if len(queued) == 3:
+                    task_path = (root_task_index,)
+                    root_task_index += 1
+                    func, task, kwargs = queued
+                else:
+                    task_path, func, task, kwargs = queued
                 future = executor.submit(func, task, **kwargs)
-                future_to_nothing[future] = None
+                future_to_path[future] = task_path
 
-            if not future_to_nothing:
+            if not future_to_path:
                 break
 
             done, _ = concurrent.futures.wait(
-                future_to_nothing.keys(),
+                future_to_path.keys(),
                 return_when=concurrent.futures.FIRST_COMPLETED,
             )
 
             for fut in done:
-                future_to_nothing.pop(fut, None)
+                task_path = future_to_path.pop(fut)
                 try:
                     result: dict = fut.result()
                 except TimeoutError as exc:
@@ -606,15 +622,17 @@ def split_queue(
                 completed_tasks += 1
                 check_deadline()
 
-                for nt in result.get("new_tasks", []) or []:
-                    task_queue.put(nt)
+                for child_index, nt in enumerate(result.get("new_tasks", []) or []):
+                    task_queue.put((task_path + (child_index,), *nt))
 
                 gen = result.get("generation")
                 if isinstance(gen, gpd.GeoDataFrame) and len(gen) > 0:
-                    splitted.append(gen)
+                    ordered_zones.append((task_path, gen))
 
                 roads = result.get("generated_roads")
                 if isinstance(roads, gpd.GeoDataFrame) and len(roads) > 0:
-                    roads_all.append(roads)
+                    ordered_roads.append((task_path, roads))
 
-    return _merge_gdfs(splitted, local_crs), _merge_gdfs(roads_all, local_crs)
+    zones = [gdf for _, gdf in sorted(ordered_zones, key=lambda item: item[0])]
+    roads = [gdf for _, gdf in sorted(ordered_roads, key=lambda item: item[0])]
+    return _merge_gdfs(zones, local_crs), _merge_gdfs(roads, local_crs)

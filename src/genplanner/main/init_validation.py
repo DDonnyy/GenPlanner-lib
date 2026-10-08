@@ -230,6 +230,10 @@ def prepare_fixed_points_and_balance_ratios(
             raise GenPlannerArgumentError("Column 'fixed_zone' is missing in the fixed_points GeoDataFrame.")
         if not (fix_points.geom_type == "Point").all():
             raise GenPlannerArgumentError("All geometries in fixed_points must be of type 'Point'.")
+        if len(fix_points) > 0:
+            if fix_points.crs is None:
+                raise GenPlannerArgumentError("fixed_points GeoDataFrame must have a CRS.")
+            fix_points = fix_points.to_crs(features2split.crs)
 
     valid_zones_keys = set(zones_ratio_dict.keys())
 

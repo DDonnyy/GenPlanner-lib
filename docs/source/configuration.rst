@@ -12,7 +12,8 @@ application needs different defaults.
 
 ``point_pool_seed`` and ``point_pool_size``
    Seed and size of the candidate point pool used during splitting. Their
-   initial values are 42 and 200.
+   initial values are 42 and 200. The pool is created when the splitter module
+   is imported, so changing these values later does not rebuild it.
 
 ``minimum_block_area``
    Default minimum area used by block generation, initially 20,000 square
@@ -27,10 +28,12 @@ Example::
    from genplanner import config
 
    config.change_logger_lvl("DEBUG")
-   config.point_pool_seed = 7
 
 Planner-specific options such as ``parallel``, ``roads_extend_distance``, and
 ``simplify_geometry_value`` are arguments to :class:`genplanner.GenPlanner`.
+Pass ``seed=7`` to ``GenPlanner`` to repeat Voronoi site placement with the same
+inputs and runtime settings. Without ``seed``, each split uses a fresh random
+seed.
 ``max_optimization_iterations`` limits each Voronoi optimization attempt
 (default: 2000). ``max_run_seconds`` stops generation after 900 seconds by
 default and raises ``TimeoutError`` with the number of completed tasks. Pass

@@ -1,12 +1,23 @@
 import json
 import math
 import time
+from collections import defaultdict
 
 import geopandas as gpd
 import numpy as np
 import pandas as pd
 from pyproj import CRS
-from shapely import GeometryCollection, LineString, Point, linestrings, points, voronoi_polygons
+from shapely import (
+    GeometryCollection,
+    LineString,
+    Point,
+    STRtree,
+    intersection,
+    linestrings,
+    points,
+    union_all,
+    voronoi_polygons,
+)
 from shapely.geometry import MultiPoint, MultiPolygon, Polygon
 from shapely.ops import nearest_points, polygonize, unary_union
 
@@ -29,6 +40,35 @@ GLOBAL_POINT_POOL_SIZE = config.point_pool_size
 _rng_global = np.random.default_rng(GLOBAL_POINT_POOL_SEED)
 
 GLOBAL_POINT_POOL_U01 = _rng_global.random((GLOBAL_POINT_POOL_SIZE, 2), dtype=np.float64)
+
+
+def _zones_from_voronoi(voronoi_polys, voronoi_points, point2zone_list, local_crs):
+    """Match cells to sites and dissolve each zone in polygon-first order."""
+    point_indices, polygon_indices = STRtree(voronoi_polys).query(voronoi_points, predicate="within")
+    # GeoPandas sjoin visits each left polygon before its matching points.
+    order = np.lexsort((point_indices, polygon_indices))
+    groups = defaultdict(list)
+    for polygon_index, point_index in zip(polygon_indices[order], point_indices[order]):
+        groups[point2zone_list[point_index]].append(voronoi_polys[polygon_index])
+    zone_ids = sorted(groups)
+    return gpd.GeoDataFrame(
+        {"zone_id": zone_ids},
+        geometry=[union_all(groups[zone_id]) for zone_id in zone_ids],
+        crs=local_crs,
+    )
+
+
+def _clip_zones(zones_gdf, polygon):
+    """Clip polygonal zones directly, retaining GeoPandas handling for collections."""
+    # GeoPandas clip returns candidates in spatial-index order, including in the final output.
+    positions = zones_gdf.sindex.query(polygon, predicate="intersects")
+    selected = zones_gdf.iloc[positions].copy()
+    clipped = intersection(selected.geometry.array, polygon)
+    if any(geometry.geom_type == "GeometryCollection" for geometry in clipped):
+        return zones_gdf.clip(polygon, keep_geom_type=True)
+    selected.geometry = clipped
+    result = selected.loc[selected.geom_type.isin(["Polygon", "MultiPolygon"])]
+    return result
 
 
 def _is_finite_number(x) -> bool:
@@ -386,6 +426,8 @@ def split_polygon(
     areas = areas_init.copy()
     areas["ratio"] = areas["ratio"] / (areas["ratio"].sum())
     areas["area"] = areas["ratio"] * full_area
+    target_areas = areas.set_index(areas.index)["area"]
+    native_target_areas = areas["area"].sort_index().round(8).tolist()
 
     Z = len(zone_ratios)
     total_sites = sites_multiplier * Z
@@ -410,6 +452,19 @@ def split_polygon(
     best_generation = (gpd.GeoDataFrame(), gpd.GeoDataFrame())
     best_multipolygon_count = float("inf")
     best_error = float("inf")
+
+    def roads_from_coords(roads_coords):
+        roads_arr = np.asarray(roads_coords, dtype=np.float64).reshape(-1, 4)
+        p0 = roads_arr[:, 0:2]
+        p1 = roads_arr[:, 2:4]
+        p0 = denormalize_coords(p0, bounds)
+        p1 = denormalize_coords(p1, bounds)
+        if normalize_rotation:
+            p0 = rotate_coords(p0, pivot_point, +angle_rad2rotate)
+            p1 = rotate_coords(p1, pivot_point, +angle_rad2rotate)
+        line_coords = np.stack([p0, p1], axis=1)
+        road_geoms = linestrings(line_coords).tolist()
+        return gpd.GeoDataFrame(geometry=road_geoms + roads_lines, crs=local_crs)
 
     for i in range(attempts):
         if deadline is not None and time.monotonic() >= deadline:
@@ -452,7 +507,7 @@ def split_polygon(
                 generator_points_xy=generator_points_xy,
                 point2zone=point2zone_list,
                 point_fixed_mask=point_fixed_mask,
-                zone_target_area=areas["area"].sort_index().round(8).tolist(),
+                zone_target_area=native_target_areas,
                 zone_neighbors=zone_neighbors_idx,
                 zone_forbidden=zone_forbidden_idx,
                 write_logs=write_logs,
@@ -471,13 +526,9 @@ def split_polygon(
             voronoi_points = points(voronoi_coords)
             voronoi_polys = list(voronoi_polygons(MultiPoint(voronoi_points)).geoms)
 
-            voronoi_points_gdf = gpd.GeoDataFrame({"zone_id": point2zone_list}, geometry=voronoi_points, crs=local_crs)
-            voronoi_polys_gdf = gpd.GeoDataFrame(geometry=voronoi_polys, crs=local_crs)
+            zones_gdf = _zones_from_voronoi(voronoi_polys, voronoi_points, point2zone_list, local_crs)
 
-            voronoi_polys_gdf = voronoi_polys_gdf.sjoin(voronoi_points_gdf, how="left", predicate="contains")
-            zones_gdf = voronoi_polys_gdf.dissolve(by="zone_id", as_index=False)
-
-            zones_gdf = zones_gdf.clip(polygon_to_split, keep_geom_type=True)
+            zones_gdf = _clip_zones(zones_gdf, polygon_to_split)
             zones_gdf["zone"] = zones_gdf["zone_id"].map(idx2zone)
 
             valid_geometry = (
@@ -491,25 +542,11 @@ def split_polygon(
 
             multipolygon_count = sum(isinstance(geom, MultiPolygon) for geom in zones_gdf.geometry)
 
-            # roads
-            roads_arr = np.asarray(roads_coords, dtype=np.float64).reshape(-1, 4)
-            p0 = roads_arr[:, 0:2]
-            p1 = roads_arr[:, 2:4]
-            p0 = denormalize_coords(p0, bounds)
-            p1 = denormalize_coords(p1, bounds)
-            if normalize_rotation:
-                p0 = rotate_coords(p0, pivot_point, +angle_rad2rotate)
-                p1 = rotate_coords(p1, pivot_point, +angle_rad2rotate)
-            line_coords = np.stack([p0, p1], axis=1)
-            road_geoms = linestrings(line_coords).tolist()
-            roads_gdf = gpd.GeoDataFrame(geometry=road_geoms + roads_lines, crs=local_crs)
-
             if multipolygon_count > 0:
                 if allow_multipolygon:
-                    return zones_gdf[["zone", "geometry"]], roads_gdf
+                    return zones_gdf[["zone", "geometry"]], roads_from_coords(roads_coords)
 
                 actual_areas = zones_gdf.set_index("zone_id").geometry.area
-                target_areas = areas.set_index(areas.index)["area"]
                 aligned = actual_areas.reindex(target_areas.index)
                 if aligned.isna().any():
                     area_error = float("inf")
@@ -519,7 +556,7 @@ def split_polygon(
                 if (multipolygon_count < best_multipolygon_count) or (
                     multipolygon_count == best_multipolygon_count and area_error < best_error
                 ):
-                    best_generation = (zones_gdf.explode(ignore_index=True), roads_gdf.copy())
+                    best_generation = (zones_gdf.explode(ignore_index=True), roads_from_coords(roads_coords).copy())
                     best_multipolygon_count = multipolygon_count
                     best_error = area_error
 
@@ -527,7 +564,7 @@ def split_polygon(
                     f"MultiPolygon returned (count={multipolygon_count}, area_error={area_error:.6f}). Recalculating."
                 )
 
-            return zones_gdf[["zone", "geometry"]], roads_gdf
+            return zones_gdf[["zone", "geometry"]], roads_from_coords(roads_coords)
 
         except MultiPolygonSplitError:
             continue

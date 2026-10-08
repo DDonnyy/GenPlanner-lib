@@ -36,7 +36,9 @@ impl candle_core::CustomOp1 for Layer {
                 generator_points_xy,
             );
             if !cc.iter().all(|value| value.is_finite()) {
-                return Err(candle_core::Error::Msg("Non-finite Voronoi vertex".to_string()));
+                return Err(candle_core::Error::Msg(
+                    "Non-finite Voronoi vertex".to_string(),
+                ));
             }
             voronoi_vertices_xy[i_vtxv * 2 + 0] = cc[0];
             voronoi_vertices_xy[i_vtxv * 2 + 1] = cc[1];
@@ -141,7 +143,6 @@ pub struct VoronoiInfo {
     pub point2cell_idx: Vec<usize>,
     pub cell_idx2vertex_idx: Vec<usize>,
     pub idx2site: Vec<usize>,
-    pub vtxv2info: Vec<[usize; 4]>,
 }
 
 impl VoronoiInfo {
@@ -150,7 +151,6 @@ impl VoronoiInfo {
             point2cell_idx: Vec::new(),
             cell_idx2vertex_idx: Vec::new(),
             idx2site: Vec::new(),
-            vtxv2info: Vec::new(),
         }
     }
 }
@@ -168,7 +168,7 @@ where
     let voronoi_mesh = crate::voronoi_core::indexing(&site2cell[..]);
     let site2_to_voronoi2 = Layer {
         boundary_xy: boundary_xy.to_vec(),
-        vtxv2info: voronoi_mesh.vtxv2info.clone(),
+        vtxv2info: voronoi_mesh.vtxv2info,
     };
     let voronoi_vertices_xy = generator_points_xy.apply_op1(site2_to_voronoi2)?;
     let idx2site = del_msh_core::elem2elem::from_polygon_mesh(
@@ -179,7 +179,6 @@ where
     let voronoi_info = VoronoiInfo {
         point2cell_idx: voronoi_mesh.site2idx,
         cell_idx2vertex_idx: voronoi_mesh.idx2vtxv,
-        vtxv2info: voronoi_mesh.vtxv2info,
         idx2site,
     };
     Ok((voronoi_vertices_xy, voronoi_info))

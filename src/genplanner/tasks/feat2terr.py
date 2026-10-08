@@ -131,7 +131,9 @@ def multi_feature2terr_zones_initial(task, **kwargs):
             if geom is None or geom.is_empty:
                 continue
             zone_anchors[z] = geom.representative_point()
-    zone_permitted = set(division["zone"].items())
+    # Keep spatial-join order stable: set iteration depends on Python's hash seed
+    # and otherwise changes the order of variables sent to the LP solver.
+    zone_permitted = list(dict.fromkeys(division["zone"].items()))
     feature_point = feature_centroids.to_dict()
     dist_coef: dict[tuple, float] = {}
     for i, z in zone_permitted:
@@ -143,7 +145,7 @@ def multi_feature2terr_zones_initial(task, **kwargs):
         if d is None or not np.isfinite(d):
             continue
         dist_coef[(i, z)] = float(d)
-    zone_permitted = set(dist_coef.keys())
+    zone_permitted = list(dist_coef)
 
     terr_zones = terr_zones.reset_index(names="zone")
     terr_zones["required_area"] = terr_zones["required_area"] * 0.999
@@ -175,7 +177,9 @@ def multi_feature2terr_zones_initial(task, **kwargs):
 
     if len(fixed_terr_zones) > 0:
         fixed_terr_zones["zone_name"] = fixed_terr_zones["fixed_zone"].apply(lambda x: x.name)
-        zone_strongly_fixed = set(initial_gdf.sjoin(fixed_terr_zones)[["zone_name"]].itertuples(name=None))
+        zone_strongly_fixed = list(
+            dict.fromkeys(initial_gdf.sjoin(fixed_terr_zones)[["zone_name"]].itertuples(name=None))
+        )
         for i, z in zone_strongly_fixed:
             if (i, z) in x:
                 model += x[i, z] >= 1e-3, f"StronglyFixed_{i}_{z}"
